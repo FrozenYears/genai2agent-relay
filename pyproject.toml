@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "genai2agent-relay"
+version = "0.1.0"
+description = "Protocol-neutral text action transport behind OpenAI-compatible chat gateways"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+dependencies = [
+  "Flask>=3.0,<4",
+  "jsonschema>=4.20,<5",
+  "python-dotenv>=1.0,<2",
+  "requests>=2.31,<3",
+]
+
+[project.urls]
+Repository = "https://github.com/negativegluon/genai2agent-relay"
+Issues = "https://github.com/negativegluon/genai2agent-relay/issues"
+
+[project.scripts]
+genai2agent-relay = "relay.main:main"
+
+[tool.setuptools.packages.find]
+include = ["relay*"]

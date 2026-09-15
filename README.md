@@ -1,0 +1,218 @@
+# GenAI2AgentRelay
+
+GenAI2AgentRelay converts native function-tool requests into a validated
+plain-text action transport. It is designed as a second hop behind
+[`jollyxenon/shanghaitech-genai2api`](https://github.com/jollyxenon/shanghaitech-genai2api),
+or any other upstream that accepts ordinary OpenAI-style chat messages but
+cannot reliably return native tool calls.
+
+The built-in HTTP adapter exposes OpenAI Chat Completions. The conversion
+engine itself has no Flask, SSE, Anthropic, Responses API, or coding-agent
+dependency.
+
+## How it works
+
+```text
+OpenAI-compatible client
+  POST /v1/chat/completions with messages + tools
+               |
+               v
+GenAI2AgentRelay
+  1. removes native tool and system-role channels
+  2. renders tool schemas into ordinary conversation text
+  3. encodes earlier calls/results as text envelopes
+               |
+               v
+Plain-text chat completion backend
+  jollyxenon/shanghaitech-genai2api by default
+               |
+               v
+Complete @@ACTION@@ JSON envelope
+  buffered -> parsed -> allowlisted -> JSON-Schema validated
+               |
+               v
+OpenAI-compatible tool_calls response
+```
+
+The upstream model requests an operation using ordinary text:
+
+```text
+@@ACTION@@{"calls":[{"operation":"read_file","parameters":{"path":"README.md"}}]}@@END_ACTION@@
+```
+
+Tool execution remains entirely in the downstream client. This service never
+executes a command, reads a requested file, or invokes a submitted tool.
+
+## Safety properties
+
+- Native `tools` and `system` roles are never sent to the first hop.
+- Only a complete, final action envelope is considered a call.
+- Each operation must occur in the current request's allowlist.
+- Parameters are validated against the tool's supplied JSON Schema.
+- Partial, oversized, malformed, unknown, and native-token calls are rejected.
+- Invalid model serialization can be retried before any call is returned.
+- Request bodies, arguments, and credentials are not logged.
+
+This is a transport boundary, not a permission system. The downstream client
+must still authorize and sandbox tool execution.
+
+## Run the two-hop setup
+
+First start `jollyxenon/shanghaitech-genai2api` according to its own README. It
+must expose `POST /v1/chat/completions`; `GET /v1/models` is used for model-list
+passthrough. A typical first-hop configuration listens only on loopback:
+
+```dotenv
+GENAI_TOKEN=replace-with-your-login-token
+HOST=127.0.0.1
+PORT=31100
+API_FORMAT=openai
+API_KEY=replace-with-a-random-first-hop-key
+```
+
+Install and start this second hop:
+
+```bash
+git clone https://github.com/negativegluon/genai2agent-relay.git
+cd genai2agent-relay
+python3 -m venv .venv
+. .venv/bin/activate
+python -m pip install -e .
+cp .env.example .env
+```
+
+Configure `.env`:
+
+```dotenv
+UPSTREAM_BASE_URL=http://127.0.0.1:31100
+UPSTREAM_API_KEY=replace-with-a-random-first-hop-key
+RELAY_API_KEY=replace-with-a-different-downstream-key
+HOST=127.0.0.1
+PORT=31110
+```
+
+Then run:
+
+```bash
+genai2agent-relay
+```
+
+`python main.py` is equivalent when run from the repository root.
+
+## Send a tool request
+
+Point any OpenAI Chat Completions client at `http://127.0.0.1:31110/v1`.
+For example:
+
+```bash
+curl http://127.0.0.1:31110/v1/chat/completions \
+  -H 'Authorization: Bearer replace-with-a-downstream-key' \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "model": "chatglm",
+    "messages": [{"role": "user", "content": "Read README.md"}],
+    "tools": [{
+      "type": "function",
+      "function": {
+        "name": "read_file",
+        "description": "Read one text file",
+        "parameters": {
+          "type": "object",
+          "properties": {"path": {"type": "string"}},
+          "required": ["path"],
+          "additionalProperties": false
+        }
+      }
+    }]
+  }'
+```
+
+The response uses the normal `choices[0].message.tool_calls` shape. Historical
+assistant calls and `role: tool` results are translated back into text before
+the next upstream turn. `tool_choice` values `auto`, `none`, `required`, and a
+named function are supported.
+
+Streaming requests are accepted, but deliberately buffered: the relay waits
+for and validates the complete upstream response before emitting downstream
+SSE chunks. This increases time to first event and prevents a partial envelope
+from becoming executable.
+
+## API surface
+
+- `GET /health`
+- `GET /v1/models`
+- `POST /v1/chat/completions`
+
+Anthropic Messages and OpenAI Responses adapters are intentionally not built
+in. Clients that only speak those protocols need a separate thin adapter. This
+keeps the action transport reusable instead of coupling it to a specific agent
+or vendor event stream.
+
+For a short, operational Claude Code setup using a separate protocol adapter,
+see [Claude Code adapter reference](docs/claude-code-adapter-reference.zh-CN.md).
+
+## Protocol-neutral engine
+
+The reusable API lives in `relay.engine`:
+
+```python
+from relay.engine import (
+    RelayRequest,
+    TextActionRelay,
+    TextCompletionRequest,
+    TextMessage,
+    UpstreamReply,
+)
+
+
+class MyBackend:
+    def complete(self, request: TextCompletionRequest) -> UpstreamReply:
+        # Adapt request.messages to any plain-text completion service.
+        return UpstreamReply(content="ordinary model text")
+
+
+relay = TextActionRelay(MyBackend(), retries=1, max_action_bytes=1_048_576)
+result = relay.run(RelayRequest(
+    model="my-model",
+    messages=(TextMessage(role="user", content="hello"),),
+))
+```
+
+`TextCompletionBackend` is a structural protocol: another backend only needs a
+`complete(TextCompletionRequest) -> UpstreamReply` method. Downstream adapters can map
+their native tool definitions to `ToolSpec`, then map `RelayResult.action.calls`
+back to their own response format.
+
+## Configuration
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `UPSTREAM_BASE_URL` | `http://127.0.0.1:31100` | First-hop base URL |
+| `UPSTREAM_API_KEY` | unset | Optional first-hop Bearer key |
+| `RELAY_API_KEY` | unset | Optional downstream Bearer or `x-api-key` key |
+| `HOST` | `127.0.0.1` | Listen address |
+| `PORT` | `31110` | Listen port |
+| `UPSTREAM_CONNECT_TIMEOUT` | `10` | Connection timeout in seconds |
+| `UPSTREAM_READ_TIMEOUT` | `1800` | Completion timeout in seconds |
+| `UPSTREAM_ACTION_RETRIES` | `1` | Retries after invalid serialization |
+| `MAX_ACTION_BYTES` | `1048576` | Maximum buffered response size |
+
+Keep both hops on loopback unless remote access is protected with TLS,
+authentication, and network policy. `.env` is ignored by Git.
+
+## Tests
+
+```bash
+python -m unittest discover -v
+```
+
+Tests use fake backends and require no API credentials or network access.
+
+## Relationship to the upstream project
+
+This repository is an independent second-hop adapter, not a fork. It consumes
+only the public HTTP interface of `jollyxenon/shanghaitech-genai2api`. The text
+action technique was extracted from a locally validated relay and generalized
+without project paths, accounts, credentials, or deployment-specific logic.
+
+Both projects use the MIT License.
