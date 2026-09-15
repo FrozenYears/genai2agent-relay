@@ -200,27 +200,6 @@ back to their own response format.
 Keep both hops on loopback unless remote access is protected with TLS,
 authentication, and network policy. `.env` is ignored by Git.
 
-## Tests
-
-```bash
-python -m unittest discover -v
-```
-
-Tests use fake backends and require no API credentials or network access.
-
-## Publish with your own GitHub API token
-
-The repository includes a root-level publishing workflow that does not require
-GitHub CLI and does not persist the token:
-
-```bash
-./scripts/publish-github.sh
-```
-
-It interactively reads a Personal Access Token, creates the repository through
-the GitHub REST API when needed, and pushes `main`. See the
-[Chinese token publishing guide](docs/github-token-publish.zh-CN.md) for token
-permissions and troubleshooting.
 
 ## Relationship to the upstream project
 
