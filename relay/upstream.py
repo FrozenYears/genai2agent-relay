@@ -32,6 +32,7 @@ class UpstreamClient:
             ],
             "stream": False,
             "max_tokens": request.max_tokens,
+            **request.options,
             **request.sampling,
         }
         try:

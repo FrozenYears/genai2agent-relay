@@ -174,6 +174,26 @@ events. Anthropic callers receive `message_start`/`content_block_*`/
 For a short, operational Claude Code setup, see
 [Claude Code adapter reference](docs/claude-code-adapter-reference.zh-CN.md).
 
+## First-hop capability pass-through
+
+Recent `shanghaitech-genai2api` builds expose image and document attachments, a
+thinking switch, and platform web search. The relay carries those capabilities
+through unchanged:
+
+- Client thinking controls collapse to one boolean `thinking` field; levels are
+  not forwarded as unknown strings.
+- `web_search: true`, `web_search_options`, or a declared `web_search*` tool sets
+  the upstream `web_search` boolean. Search declarations are never treated as
+  locally executable functions.
+- Image blocks (`image_url` / `input_image` / Anthropic `image`) and document
+  blocks (`file` / `input_file` / Anthropic `document`) keep their attachments
+  instead of being flattened into base64 prompt text.
+- Chain-of-thought is returned where each protocol expects it: Chat
+  `reasoning_content`, Anthropic `thinking` blocks, Responses `reasoning` items.
+
+Details, field mapping, and the Pi Agent validation results are in
+[GenAI2API feature pass-through](docs/genai2api-feature-passthrough.zh-CN.md).
+
 ## Protocol-neutral engine
 
 The reusable API lives in `relay.engine`:

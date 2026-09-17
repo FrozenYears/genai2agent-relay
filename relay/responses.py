@@ -6,8 +6,9 @@ import uuid
 from typing import Any, Iterable
 
 from .actions import ToolSpec, encode_calls, encode_result
+from .content import attachments_of, build_content, file_block, image_block, text_of
 from .engine import RelayRequest, RelayResult, TextMessage
-from .normalize import flatten_text
+from .features import request_options
 
 
 def _items(value: Any) -> list[dict[str, Any]]:
@@ -22,6 +23,44 @@ def _arguments(value: Any) -> dict[str, Any]:
     except json.JSONDecodeError:
         return {"raw": value}
     return parsed if isinstance(parsed, dict) else {"raw": value}
+
+
+def _file_source(part: dict[str, Any]) -> dict[str, Any]:
+    file = part.get("file") if isinstance(part.get("file"), dict) else {}
+    merged = {key: part[key] for key in ("filename", "file_data", "file_url") if key in part}
+    merged.update(file)
+    return merged
+
+
+def response_content(content: Any) -> str | list[dict[str, Any]]:
+    """Preserve text, image and file parts of a Responses content array."""
+    if isinstance(content, str) or content is None:
+        return content or ""
+    if not isinstance(content, list):
+        return text_of(content)
+    texts: list[str] = []
+    attachments: list[dict[str, Any]] = []
+    for part in content:
+        if isinstance(part, str):
+            texts.append(part)
+            continue
+        if not isinstance(part, dict):
+            continue
+        kind = part.get("type")
+        if kind in {"input_text", "output_text", "text", "summary_text"}:
+            texts.append(str(part.get("text") or ""))
+        elif kind in {"input_image", "image_url", "image"}:
+            image = part.get("image_url") or (part.get("source") or {}).get("url")
+            if isinstance(image, dict):
+                image = image.get("url")
+            block = image_block(image, part.get("detail"))
+            if block:
+                attachments.append(block)
+        elif kind in {"input_file", "file"}:
+            block = file_block(_file_source(part))
+            if block:
+                attachments.append(block)
+    return build_content(texts, attachments)
 
 
 def response_tools(raw_tools: Any) -> list[ToolSpec]:
@@ -59,61 +98,84 @@ def normalize_choice(choice: Any) -> str:
 
 
 def prepare_responses(body: dict[str, Any], tools: list[ToolSpec], choice: str) -> RelayRequest:
-    instructions = flatten_text(body.get("instructions"))
+    instructions = text_of(body.get("instructions"))
     raw_input = body.get("input")
-    messages: list[dict[str, str]] = []
+    messages: list[TextMessage] = []
     if isinstance(raw_input, str):
         if raw_input:
-            messages.append({"role": "user", "content": raw_input})
+            messages.append(TextMessage(role="user", content=raw_input))
     else:
         for item in _items(raw_input):
             kind = item.get("type")
+            if kind in {"reasoning", "item_reference"}:
+                # Historical chain-of-thought is not replayed to the first hop.
+                continue
             if kind == "function_call":
                 arguments = item.get("arguments")
                 try:
                     parameters = json.loads(arguments) if isinstance(arguments, str) else arguments
                 except json.JSONDecodeError:
                     parameters = {"raw": arguments}
-                messages.append({"role": "assistant", "content": encode_calls([{
+                messages.append(TextMessage(role="assistant", content=encode_calls([{
                     "operation": str(item.get("name") or ""),
                     "parameters": parameters if isinstance(parameters, dict) else {},
-                }])})
+                }])))
                 continue
             if kind == "function_call_output":
-                messages.append({"role": "user", "content": encode_result(
-                    str(item.get("call_id") or "unknown"),
-                    flatten_text(item.get("output")),
-                )})
+                raw = response_content(item.get("output"))
+                envelope = encode_result(str(item.get("call_id") or "unknown"), text_of(raw))
+                messages.append(TextMessage(
+                    role="user",
+                    content=build_content([envelope], attachments_of(raw)),
+                ))
                 continue
             role = "assistant" if item.get("role") == "assistant" else "user"
-            text = flatten_text(item.get("content"))
+            content = response_content(item.get("content"))
             if role == "assistant" and item.get("tool_calls"):
-                text = (text + "\n" if text else "") + encode_calls([
-                    {
-                        "operation": str((call.get("function") or {}).get("name") or ""),
-                        "parameters": _arguments((call.get("function") or {}).get("arguments")),
-                    }
-                    for call in item["tool_calls"]
-                    if isinstance(call, dict)
-                ])
-            if text:
-                messages.append({"role": role, "content": text})
+                content = build_content([
+                    text_of(content),
+                    encode_calls([
+                        {
+                            "operation": str((call.get("function") or {}).get("name") or ""),
+                            "parameters": _arguments((call.get("function") or {}).get("arguments")),
+                        }
+                        for call in item["tool_calls"]
+                        if isinstance(call, dict)
+                    ]),
+                ], attachments_of(content))
+            if text_of(content) or attachments_of(content):
+                messages.append(TextMessage(role=role, content=content))
 
     sampling = {key: body[key] for key in ("temperature", "top_p") if key in body}
     return RelayRequest(
         model=str(body.get("model") or "chatglm"),
-        messages=tuple(TextMessage(**message) for message in messages),
+        messages=tuple(messages),
         instructions=instructions,
         tools=tuple(tools),
         tool_choice=choice,
         max_tokens=int(body.get("max_output_tokens") or 8192),
         sampling=sampling,
+        upstream_options=request_options(body, body.get("tools"), "responses"),
     )
+
+
+def _reasoning_item(item_id: str, text: str, status: str) -> dict[str, Any]:
+    summary = [{"type": "summary_text", "text": text}] if status == "completed" else []
+    return {
+        "id": item_id,
+        "type": "reasoning",
+        "summary": summary,
+        "content": [],
+        "encrypted_content": None,
+        "status": status,
+    }
 
 
 def build_output(result: RelayResult) -> list[dict[str, Any]]:
     decoded = result.action
     output: list[dict[str, Any]] = []
+    if result.upstream.reasoning:
+        output.append(_reasoning_item("rs_" + uuid.uuid4().hex[:24], result.upstream.reasoning, "completed"))
     if decoded.text:
         output.append({
             "type": "message",
@@ -165,6 +227,35 @@ def build_response(body: dict[str, Any], result: RelayResult) -> dict[str, Any]:
     }
 
 
+def _reasoning_events(index: int, item: dict[str, Any]) -> Iterable[str]:
+    item_id = item["id"]
+    text = item["summary"][0]["text"] if item["summary"] else ""
+
+    def emit(event: str, data: dict[str, Any]) -> str:
+        return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
+
+    yield emit("response.output_item.added", {
+        "type": "response.output_item.added", "output_index": index,
+        "item": {**item, "status": "in_progress", "summary": []},
+    })
+    yield emit("response.reasoning_summary_part.added", {
+        "type": "response.reasoning_summary_part.added", "item_id": item_id,
+        "output_index": index, "summary_index": 0, "part": {"type": "summary_text", "text": ""},
+    })
+    yield emit("response.reasoning_summary_text.delta", {
+        "type": "response.reasoning_summary_text.delta", "item_id": item_id,
+        "output_index": index, "summary_index": 0, "delta": text,
+    })
+    yield emit("response.reasoning_summary_text.done", {
+        "type": "response.reasoning_summary_text.done", "item_id": item_id,
+        "output_index": index, "summary_index": 0, "text": text,
+    })
+    yield emit("response.reasoning_summary_part.done", {
+        "type": "response.reasoning_summary_part.done", "item_id": item_id,
+        "output_index": index, "summary_index": 0, "part": {"type": "summary_text", "text": text},
+    })
+
+
 def stream_events(body: dict[str, Any], result: RelayResult) -> Iterable[str]:
     response = build_response(body, result)
 
@@ -176,7 +267,9 @@ def stream_events(body: dict[str, Any], result: RelayResult) -> Iterable[str]:
         "response": {**response, "status": "in_progress", "output": [], "output_text": ""},
     })
     for index, item in enumerate(response["output"]):
-        if item["type"] == "message":
+        if item["type"] == "reasoning":
+            yield from _reasoning_events(index, item)
+        elif item["type"] == "message":
             yield emit("response.output_item.added", {
                 "type": "response.output_item.added", "output_index": index,
                 "item": {**item, "status": "in_progress", "content": []},
@@ -219,14 +312,14 @@ def stream_events(body: dict[str, Any], result: RelayResult) -> Iterable[str]:
 
 def estimate_tokens(body: dict[str, Any], tools: list[ToolSpec]) -> int:
     """Rough character-based estimate. This transport never calls the model to count."""
-    total = len(flatten_text(body.get("instructions")))
+    total = len(text_of(body.get("instructions")))
     raw_input = body.get("input")
     if isinstance(raw_input, str):
         total += len(raw_input)
     for item in _items(raw_input):
-        total += len(flatten_text(item.get("content")))
-        total += len(flatten_text(item.get("output")))
-        total += len(flatten_text(item.get("arguments")))
+        total += len(text_of(item.get("content")))
+        total += len(text_of(item.get("output")))
+        total += len(text_of(item.get("arguments")))
     for tool in tools:
         total += len(tool.name) + len(tool.description) + len(json.dumps(tool.parameters, ensure_ascii=False))
     return max(1, total // 4 + 8)
