@@ -187,7 +187,10 @@ through unchanged:
   locally executable functions.
 - Image blocks (`image_url` / `input_image` / Anthropic `image`) and document
   blocks (`file` / `input_file` / Anthropic `document`) keep their attachments
-  instead of being flattened into base64 prompt text.
+  instead of being flattened into base64 prompt text. Image URLs, including
+  data URLs, are forwarded as-is: current first-hop builds hand them to the
+  platform directly without an upload step, while documents are still uploaded
+  by the first hop.
 - Chain-of-thought is returned where each protocol expects it: Chat
   `reasoning_content`, Anthropic `thinking` blocks, Responses `reasoning` items.
 
