@@ -4,24 +4,39 @@ import json
 from typing import Any, Iterable
 
 from .actions import ToolSpec, encode_calls, encode_result
+from .content import attachments_of, build_content, file_block, image_block, text_of
 from .engine import RelayRequest, TextMessage
+from .features import request_options
 
 
-def flatten_text(value: Any) -> str:
-    if value is None:
-        return ""
-    if isinstance(value, str):
-        return value
-    if isinstance(value, list):
-        return "\n".join(part for item in value if (part := flatten_text(item)))
-    if isinstance(value, dict):
-        for key in ("text", "input_text", "output_text"):
-            if isinstance(value.get(key), str):
-                return value[key]
-        if "content" in value:
-            return flatten_text(value["content"])
-        return json.dumps(value, ensure_ascii=False)
-    return str(value)
+def chat_content(content: Any) -> str | list[dict[str, Any]]:
+    """Preserve text, image and file parts of a Chat Completions message."""
+    if isinstance(content, str) or content is None:
+        return content or ""
+    if not isinstance(content, list):
+        return text_of(content)
+    texts: list[str] = []
+    attachments: list[dict[str, Any]] = []
+    for part in content:
+        if isinstance(part, str):
+            texts.append(part)
+        elif isinstance(part, dict):
+            kind = part.get("type")
+            if kind in {"text", "input_text", "output_text"}:
+                texts.append(str(part.get("text") or ""))
+            elif kind == "image_url":
+                image = part.get("image_url")
+                if isinstance(image, str):
+                    image = {"url": image}
+                if isinstance(image, dict):
+                    block = image_block(image.get("url"), image.get("detail"))
+                    if block:
+                        attachments.append(block)
+            elif kind == "file":
+                block = file_block(part.get("file"))
+                if block:
+                    attachments.append(block)
+    return build_content(texts, attachments)
 
 
 def _unique_tools(tools: Iterable[ToolSpec]) -> list[ToolSpec]:
@@ -68,21 +83,21 @@ def normalize_choice(choice: Any) -> str:
 
 def prepare_chat(body: dict[str, Any], tools: list[ToolSpec], choice: str) -> RelayRequest:
     system_parts: list[str] = []
-    messages: list[dict[str, str]] = []
+    messages: list[TextMessage] = []
     for message in body.get("messages") or []:
         if not isinstance(message, dict):
             continue
         role = message.get("role", "user")
         if role in {"system", "developer"}:
-            system_parts.append(flatten_text(message.get("content")))
+            system_parts.append(text_of(message.get("content")))
             continue
         if role == "tool":
-            messages.append({"role": "user", "content": encode_result(
-                str(message.get("tool_call_id") or "unknown"),
-                flatten_text(message.get("content")),
-            )})
+            raw = chat_content(message.get("content"))
+            attachments = attachments_of(raw)
+            envelope = encode_result(str(message.get("tool_call_id") or "unknown"), text_of(raw))
+            messages.append(TextMessage(role="user", content=build_content([envelope], attachments)))
             continue
-        content = flatten_text(message.get("content"))
+        content = chat_content(message.get("content"))
         raw_calls = message.get("tool_calls") or []
         if role == "assistant" and raw_calls:
             calls = []
@@ -94,15 +109,17 @@ def prepare_chat(body: dict[str, Any], tools: list[ToolSpec], choice: str) -> Re
                 except json.JSONDecodeError:
                     parameters = {"raw": arguments}
                 calls.append({"operation": function.get("name", ""), "parameters": parameters})
-            content = (content + "\n" if content else "") + encode_calls(calls)
-        messages.append({"role": "assistant" if role == "assistant" else "user", "content": content})
+            content = build_content([text_of(content), encode_calls(calls)], attachments_of(content))
+        messages.append(TextMessage(role="assistant" if role == "assistant" else "user", content=content))
+
     sampling = {key: body[key] for key in ("temperature", "top_p", "stop") if key in body}
     return RelayRequest(
         model=str(body.get("model") or "chatglm"),
-        messages=tuple(TextMessage(**message) for message in messages),
+        messages=tuple(messages),
         instructions="\n\n".join(system_parts),
         tools=tuple(tools),
         tool_choice=choice,
         max_tokens=int(body.get("max_tokens") or 8192),
         sampling=sampling,
+        upstream_options=request_options(body, body.get("tools"), "chat"),
     )

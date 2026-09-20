@@ -9,10 +9,12 @@ from typing import Any, Iterable
 
 from flask import Flask, Response, jsonify, request, stream_with_context
 
+from . import messages, responses
 from .actions import ActionTransportError
 from .config import RelayConfig
 from .engine import RelayResult, TextActionRelay, TextCompletionBackend, UpstreamReply
-from .normalize import chat_tools, normalize_choice, prepare_chat
+from .normalize import chat_tools, prepare_chat
+from .normalize import normalize_choice as chat_choice
 from .upstream import UpstreamClient, UpstreamError
 
 logger = logging.getLogger(__name__)
@@ -27,6 +29,10 @@ def _request_key() -> str:
 
 def _error(message: str, status: int = 502):
     return jsonify({"error": {"type": "api_error", "message": message}}), status
+
+
+def _protocol_error(payload: dict[str, Any], status: int):
+    return jsonify(payload), status
 
 
 def _usage(reply: UpstreamReply) -> dict[str, int]:
@@ -144,7 +150,7 @@ def create_app(
             return _error("Missing messages array", 400)
         try:
             tools = chat_tools(body.get("tools"))
-            choice = normalize_choice(body.get("tool_choice"))
+            choice = chat_choice(body.get("tool_choice"))
             relay_request = prepare_chat(body, tools, choice)
         except (TypeError, ValueError) as exc:
             return _error(str(exc), 400)
@@ -154,5 +160,66 @@ def create_app(
         except (UpstreamError, ActionTransportError) as exc:
             logger.warning("Chat request failed model=%s error=%s", body.get("model"), type(exc).__name__)
             return _error(str(exc))
+
+    @app.post("/v1/messages")
+    def anthropic_messages():
+        body = request.get_json(silent=True) or {}
+        if not isinstance(body, dict):
+            return _protocol_error(messages.error("Request body must be a JSON object", "invalid_request_error"), 400)
+        if not isinstance(body.get("messages"), list):
+            return _protocol_error(messages.error("Missing messages array", "invalid_request_error"), 400)
+        try:
+            tools = messages.message_tools(body.get("tools"))
+            choice = messages.normalize_choice(body.get("tool_choice"))
+            relay_request = messages.prepare_messages(body, tools, choice)
+        except (TypeError, ValueError) as exc:
+            return _protocol_error(messages.error(str(exc), "invalid_request_error"), 400)
+        try:
+            result = action_relay.run(relay_request)
+        except (UpstreamError, ActionTransportError) as exc:
+            logger.warning("Messages request failed model=%s error=%s", body.get("model"), type(exc).__name__)
+            return _protocol_error(messages.error(str(exc)), 502)
+        if body.get("stream"):
+            return Response(stream_with_context(messages.stream_events(body, result)), mimetype="text/event-stream")
+        return jsonify(messages.build_response(body, result))
+
+    @app.post("/v1/messages/count_tokens")
+    def anthropic_count_tokens():
+        body = request.get_json(silent=True) or {}
+        if not isinstance(body, dict):
+            return _protocol_error(messages.error("Request body must be a JSON object", "invalid_request_error"), 400)
+        try:
+            tools = messages.message_tools(body.get("tools"))
+        except (TypeError, ValueError) as exc:
+            return _protocol_error(messages.error(str(exc), "invalid_request_error"), 400)
+        return jsonify({"input_tokens": messages.estimate_tokens(body, tools)})
+
+    @app.post("/v1/responses")
+    def openai_responses():
+        body = request.get_json(silent=True) or {}
+        if not isinstance(body, dict):
+            return _protocol_error(responses.error("Request body must be a JSON object"), 400)
+        try:
+            tools = responses.response_tools(body.get("tools"))
+            choice = responses.normalize_choice(body.get("tool_choice"))
+            relay_request = responses.prepare_responses(body, tools, choice)
+        except (TypeError, ValueError) as exc:
+            return _protocol_error(responses.error(str(exc)), 400)
+        try:
+            result = action_relay.run(relay_request)
+        except (UpstreamError, ActionTransportError) as exc:
+            logger.warning("Responses request failed model=%s error=%s", body.get("model"), type(exc).__name__)
+            return _protocol_error(responses.error(str(exc), "server_error"), 502)
+        if body.get("stream"):
+            return Response(stream_with_context(responses.stream_events(body, result)), mimetype="text/event-stream")
+        return jsonify(responses.build_response(body, result))
+
+    @app.post("/v1/responses/input_tokens")
+    def responses_input_tokens():
+        body = request.get_json(silent=True) or {}
+        if not isinstance(body, dict):
+            return _protocol_error(responses.error("Request body must be a JSON object"), 400)
+        tools = responses.response_tools(body.get("tools"))
+        return jsonify({"object": "response.input_tokens", "input_tokens": responses.estimate_tokens(body, tools)})
 
     return app

@@ -6,9 +6,9 @@ plain-text action transport. It is designed as a second hop behind
 or any other upstream that accepts ordinary OpenAI-style chat messages but
 cannot reliably return native tool calls.
 
-The built-in HTTP adapter exposes OpenAI Chat Completions. The conversion
-engine itself has no Flask, SSE, Anthropic, Responses API, or coding-agent
-dependency.
+The built-in HTTP adapter exposes OpenAI Chat Completions, Anthropic Messages,
+and OpenAI Responses. The conversion engine itself has no Flask, SSE, or
+coding-agent dependency.
 
 ## How it works
 
@@ -132,24 +132,70 @@ assistant calls and `role: tool` results are translated back into text before
 the next upstream turn. `tool_choice` values `auto`, `none`, `required`, and a
 named function are supported.
 
-Streaming requests are accepted, but deliberately buffered: the relay waits
-for and validates the complete upstream response before emitting downstream
-SSE chunks. This increases time to first event and prevents a partial envelope
-from becoming executable.
+Streaming requests on every protocol are accepted, but deliberately buffered:
+the relay waits for and validates the complete upstream response before
+emitting downstream SSE chunks. This increases time to first event and prevents
+a partial envelope from becoming executable.
 
 ## API surface
 
 - `GET /health`
 - `GET /v1/models`
 - `POST /v1/chat/completions`
+- `POST /v1/messages`
+- `POST /v1/messages/count_tokens`
+- `POST /v1/responses`
+- `POST /v1/responses/input_tokens`
 
-Anthropic Messages and OpenAI Responses adapters are intentionally not built
-in. Clients that only speak those protocols need a separate thin adapter. This
-keeps the action transport reusable instead of coupling it to a specific agent
-or vendor event stream.
+All three protocols share one conversion engine and one tool allowlist. They
+differ only in how requests and results are mapped to and from the text action
+transport:
 
-For a short, operational Claude Code setup using a separate protocol adapter,
-see [Claude Code adapter reference](docs/claude-code-adapter-reference.zh-CN.md).
+| Protocol | Tool definition | Tool request | Tool result history |
+| --- | --- | --- | --- |
+| Chat Completions | `tools[].function.parameters` | `message.tool_calls` | `role: tool` |
+| Messages | `tools[].input_schema` | `content[].tool_use` | `content[].tool_result` |
+| Responses | `tools[].parameters` | `output[].function_call` | `function_call_output` |
+
+`system` and `instructions` are merged into ordinary user context; a system
+role is never sent to the first hop. Anthropic `tool_choice` values `auto`,
+`any`, `none`, and `{type: tool, name}` map onto the same internal choices as
+their Chat Completions equivalents.
+
+The two token-counting endpoints return a local character-based estimate. This
+transport never performs an extra model round trip just to count tokens.
+
+Streaming is accepted on all three protocols but deliberately buffered: the
+relay waits for and validates the complete upstream response before emitting
+events. Anthropic callers receive `message_start`/`content_block_*`/
+`message_delta`/`message_stop`; Responses callers receive
+`response.created`/`response.output_item.*`/`response.completed`.
+
+For a short, operational Claude Code setup, see
+[Claude Code adapter reference](docs/claude-code-adapter-reference.zh-CN.md).
+
+## First-hop capability pass-through
+
+Recent `shanghaitech-genai2api` builds expose image and document attachments, a
+thinking switch, and platform web search. The relay carries those capabilities
+through unchanged:
+
+- Client thinking controls collapse to one boolean `thinking` field; levels are
+  not forwarded as unknown strings.
+- `web_search: true`, `web_search_options`, or a declared `web_search*` tool sets
+  the upstream `web_search` boolean. Search declarations are never treated as
+  locally executable functions.
+- Image blocks (`image_url` / `input_image` / Anthropic `image`) and document
+  blocks (`file` / `input_file` / Anthropic `document`) keep their attachments
+  instead of being flattened into base64 prompt text. Image URLs, including
+  data URLs, are forwarded as-is: current first-hop builds hand them to the
+  platform directly without an upload step, while documents are still uploaded
+  by the first hop.
+- Chain-of-thought is returned where each protocol expects it: Chat
+  `reasoning_content`, Anthropic `thinking` blocks, Responses `reasoning` items.
+
+Details, field mapping, and the Pi Agent validation results are in
+[GenAI2API feature pass-through](docs/genai2api-feature-passthrough.zh-CN.md).
 
 ## Protocol-neutral engine
 

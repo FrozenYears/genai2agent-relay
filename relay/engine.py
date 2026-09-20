@@ -11,12 +11,15 @@ from .actions import (
     render_action_prompt,
     render_action_reminder,
 )
+from .content import append_text, prepend_text
 
 
 @dataclass(frozen=True)
 class TextMessage:
+    """One chat message; content is text or a list of text/attachment blocks."""
+
     role: str
-    content: str
+    content: str | list[dict[str, Any]]
 
 
 @dataclass(frozen=True)
@@ -28,6 +31,7 @@ class RelayRequest:
     tool_choice: str = "auto"
     max_tokens: int = 8192
     sampling: dict[str, Any] = field(default_factory=dict)
+    upstream_options: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -49,6 +53,7 @@ class TextCompletionRequest:
     messages: tuple[TextMessage, ...]
     max_tokens: int = 8192
     sampling: dict[str, Any] = field(default_factory=dict)
+    options: dict[str, Any] = field(default_factory=dict)
 
 
 class TextCompletionBackend(Protocol):
@@ -73,10 +78,11 @@ class TextActionRelay:
                 messages=tuple(messages),
                 max_tokens=request.max_tokens,
                 sampling=request.sampling,
+                options=request.upstream_options,
             )
             reply = self.backend.complete(attempt_request)
             try:
-                if not reply.content.strip():
+                if not reply.content.strip() and not reply.reasoning.strip():
                     raise ActionTransportError("First-hop model returned no visible text")
                 decoded = decode_action(reply.content, list(request.tools), self.max_action_bytes)
                 self._validate_choice(decoded, request.tool_choice)
@@ -115,7 +121,7 @@ class TextActionRelay:
                 original = messages[first_user]
                 messages[first_user] = TextMessage(
                     role="user",
-                    content=context + "\n\nUser message:\n" + original.content,
+                    content=prepend_text(original.content, context + "\n\nUser message:"),
                 )
 
         if request.tools and request.tool_choice != "none":
@@ -130,7 +136,7 @@ class TextActionRelay:
                 original = messages[last_user]
                 messages[last_user] = TextMessage(
                     role="user",
-                    content=original.content + "\n\n" + reminder,
+                    content=append_text(original.content, reminder),
                 )
         return messages
 
