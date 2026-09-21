@@ -1,3 +1,4 @@
+import json
 import unittest
 
 from relay.actions import ActionTransportError, ToolSpec, decode_action
@@ -40,6 +41,36 @@ class ActionTests(unittest.TestCase):
             4096,
         )
         self.assertEqual(decoded.calls[0].name, "Bash")
+
+    def test_quoted_examples_remain_text(self):
+        envelope = '@@ACTION@@{"calls":[{"operation":"Bash","parameters":{"command":"pwd"}}]}@@END_ACTION@@'
+        examples = [
+            '动作信封 `@@ACTION@@{...}@@END_ACTION@@` 时解析失败。',
+            f'Example `{envelope}`',
+            f'Example ``{envelope}``',
+            f'```json\n{envelope}\n```',
+            f'~~~json\n{envelope}\n~~~',
+        ]
+        for text in examples:
+            with self.subTest(text=text):
+                result = decode_action(text, TOOLS, 4096)
+                self.assertEqual(result.text, text)
+                self.assertEqual(result.calls, ())
+
+    def test_real_call_after_example_preserves_markdown_parameters(self):
+        command = 'echo "`code` ``` @@ACTION@@ @@END_ACTION@@"\nnext'
+        prefix = 'Example `@@ACTION@@{...}@@END_ACTION@@`.\n'
+        payload = json.dumps({'calls': [{'operation': 'Bash', 'parameters': {'command': command}}]})
+        result = decode_action(prefix + '@@ACTION@@' + payload + '@@END_ACTION@@', TOOLS, 4096)
+        self.assertEqual(result.text, prefix.rstrip())
+        self.assertEqual(result.calls[0].parameters['command'], command)
+
+    def test_quoted_example_does_not_hide_broken_real_call(self):
+        prefix = 'Example `@@ACTION@@{...}@@END_ACTION@@`.\n'
+        for suffix in ['@@ACTION@@{', '@@ACTION@@{bad}@@END_ACTION@@', '`@@ACTION@@{']:
+            with self.subTest(suffix=suffix):
+                with self.assertRaises(ActionTransportError):
+                    decode_action(prefix + suffix, TOOLS, 4096)
 
     def test_rejects_incomplete_unknown_and_schema_invalid_actions(self):
         invalid = [

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 from typing import Any
 
@@ -110,6 +111,23 @@ def encode_result(call_id: str, output: Any, is_error: bool = False) -> str:
     return RESULT_OPEN + json.dumps(payload, ensure_ascii=False, separators=(",", ":")) + RESULT_CLOSE
 
 
+_ACTION_OR_CODE = re.compile(
+    r"^ {0,3}(?P<fence>`{3,}|~{3,})[^\n]*\n"
+    r".*?^ {0,3}(?P=fence)[ \t]*(?:\n|$)"
+    r"|(?<!`)(?P<ticks>`+)(?!`)[^\n]*?(?<!`)(?P=ticks)(?!`)"
+    r"|@@ACTION@@",
+    re.MULTILINE | re.DOTALL,
+)
+
+
+def _first_action_start(text: str) -> int:
+    # 只跳过已闭合的代码引用；找到真实起点后不扫描参数，避免误伤参数中的 Markdown。
+    for match in _ACTION_OR_CODE.finditer(text):
+        if match.group() == ACTION_OPEN:
+            return match.start()
+    return -1
+
+
 def decode_action(text: str, tools: list[ToolSpec], max_bytes: int) -> DecodedAction:
     if not isinstance(text, str):
         raise ActionTransportError("Upstream response content is not text")
@@ -119,7 +137,8 @@ def decode_action(text: str, tools: list[ToolSpec], max_bytes: int) -> DecodedAc
         raise ActionTransportError("Native tool syntax cannot be delivered through this transport")
 
     stripped = text.rstrip()
-    if ACTION_OPEN not in stripped:
+    first_action = _first_action_start(stripped)
+    if first_action < 0:
         return DecodedAction(text=stripped, calls=())
     if not stripped.endswith(ACTION_CLOSE):
         raise ActionTransportError("Action envelope is incomplete or is not final")
@@ -129,7 +148,7 @@ def decode_action(text: str, tools: list[ToolSpec], max_bytes: int) -> DecodedAc
     body = None
     body_start = -1
     while True:
-        start = stripped.rfind(ACTION_OPEN, 0, cursor)
+        start = stripped.rfind(ACTION_OPEN, first_action, cursor)
         if start < 0:
             raise ActionTransportError("Action envelope contains malformed JSON")
         try:

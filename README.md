@@ -47,6 +47,7 @@ executes a command, reads a requested file, or invokes a submitted tool.
 
 - Native `tools` and `system` roles are never sent to the first hop.
 - Only a complete, final action envelope is considered a call.
+- Closed single-line backtick spans and closed fenced code blocks (backticks or tildes, matching delimiter length) are documentation, not executable actions. Unquoted actions still require valid JSON and a final closing marker. Unclosed or unsupported quoting remains subject to strict parsing. A model must not wrap a real call in Markdown; with automatic tool choice, a quoted call is returned as text rather than executed.
 - Each operation must occur in the current request's allowlist.
 - Parameters are validated against the tool's supplied JSON Schema.
 - Partial, oversized, malformed, unknown, and native-token calls are rejected.
