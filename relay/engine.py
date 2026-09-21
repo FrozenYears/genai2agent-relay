@@ -83,8 +83,8 @@ class TextActionRelay:
             )
             reply = self.backend.complete(attempt_request)
             try:
-                if not reply.content.strip() and not reply.reasoning.strip():
-                    raise ActionTransportError("First-hop model returned no visible text")
+                if not reply.content.strip():
+                    raise ActionTransportError("First-hop model returned no answer or action")
                 decoded = decode_action(reply.content, list(request.tools), self.max_action_bytes)
                 self._validate_choice(decoded, request.tool_choice)
                 return RelayResult(action=decoded, upstream=reply)
@@ -92,6 +92,17 @@ class TextActionRelay:
                 last_error = exc
                 if attempt >= self.retries:
                     raise
+                if not reply.content.strip():
+                    # 不把思考转为正文，也不向历史追加空的 assistant 消息。
+                    messages.append(TextMessage(
+                        role="user",
+                        content=(
+                            "上一次没有返回正文或实际工具调用，未执行任何操作。请继续。"
+                            "如果需要操作，请输出完整合法的 @@ACTION@@ JSON 封套，"
+                            "并以 @@END_ACTION@@ 结束；不要只输出思考或行动计划。"
+                        ),
+                    ))
+                    continue
                 diagnostic = ""
                 if isinstance(exc.__cause__, json.JSONDecodeError):
                     error = exc.__cause__

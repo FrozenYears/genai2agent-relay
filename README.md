@@ -57,7 +57,7 @@ executes a command, reads a requested file, or invokes a submitted tool.
 This is a transport boundary, not a permission system. The downstream client
 must still authorize and sandbox tool execution.
 
-JSON syntax retries include the parse reason and location within the envelope body; retry count and client-facing errors are unchanged. See [两次 action 封套小修记录](docs/action-envelope-fixes.zh-CN.md) for comparisons, verification, and rollback.
+JSON syntax retries include the parse reason and location within the envelope body; their client-facing errors are unchanged. Empty or reasoning-only replies request continuation using the same retry budget instead of ending the turn successfully; exhaustion returns an upstream error. Normal text replies remain valid without tools. See [封套与纯思考回复小修记录](docs/action-envelope-fixes.zh-CN.md) for comparisons, verification, and rollback.
 
 ## Run the two-hop setup
 

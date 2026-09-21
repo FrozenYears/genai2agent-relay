@@ -72,6 +72,47 @@ class EngineTests(unittest.TestCase):
                 self.assertIn(reason, feedback)
                 self.assertNotIn(bad_body, feedback)
 
+    def test_reasoning_only_retry_recovers_or_exhausts_shared_budget(self):
+        thinking = UpstreamReply(content=' \n', reasoning='Let me run a few checks.')
+        text = UpstreamReply(content='检查完成。')
+        action = UpstreamReply(content='@@ACTION@@{"calls":[{"operation":"ping","parameters":{}}]}@@END_ACTION@@')
+        malformed = UpstreamReply(content='@@ACTION@@{bad}@@END_ACTION@@')
+        request = RelayRequest(
+            model='model', messages=(TextMessage(role='user', content='检查'),),
+            tools=(ToolSpec('ping', '', {'type': 'object'}),),
+        )
+        cases = [
+            ([thinking, text], 1, True),
+            ([thinking, action], 1, True),
+            ([thinking, thinking], 1, False),
+            ([malformed, thinking], 1, False),
+            ([thinking], 0, False),
+            ([text], 1, True),
+        ]
+        for replies, retries, succeeds in cases:
+            with self.subTest(replies=replies, retries=retries):
+                attempts = []
+
+                class SequenceBackend:
+                    def complete(self, attempt):
+                        attempts.append(attempt)
+                        return replies[len(attempts) - 1]
+
+                relay = TextActionRelay(SequenceBackend(), retries, 4096)
+                if succeeds:
+                    result = relay.run(request)
+                    if replies[-1] == action:
+                        self.assertEqual(result.action.calls[0].name, 'ping')
+                    else:
+                        self.assertEqual(result.action.text, text.content)
+                else:
+                    with self.assertRaises(ActionTransportError):
+                        relay.run(request)
+                self.assertEqual(len(attempts), len(replies))
+                if replies[0] == thinking and retries:
+                    self.assertTrue(all(m.content.strip() for m in attempts[1].messages))
+                    self.assertNotIn(thinking.reasoning, [m.content for m in attempts[1].messages])
+
 
 if __name__ == "__main__":
     unittest.main()
