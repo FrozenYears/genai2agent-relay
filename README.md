@@ -57,6 +57,8 @@ executes a command, reads a requested file, or invokes a submitted tool.
 This is a transport boundary, not a permission system. The downstream client
 must still authorize and sandbox tool execution.
 
+JSON syntax retries include the parse reason and location within the envelope body; retry count and client-facing errors are unchanged. See [两次 action 封套小修记录](docs/action-envelope-fixes.zh-CN.md) for comparisons, verification, and rollback.
+
 ## Run the two-hop setup
 
 First start `jollyxenon/shanghaitech-genai2api` according to its own README. It

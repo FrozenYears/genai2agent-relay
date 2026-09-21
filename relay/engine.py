@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
@@ -91,6 +92,15 @@ class TextActionRelay:
                 last_error = exc
                 if attempt >= self.retries:
                     raise
+                diagnostic = ""
+                if isinstance(exc.__cause__, json.JSONDecodeError):
+                    error = exc.__cause__
+                    diagnostic = (
+                        f" The envelope JSON failed to parse: {error.msg} "
+                        f"(line {error.lineno}, column {error.colno} within the JSON body). "
+                        "Check the JSON structure at that position and resend the complete envelope, "
+                        "not a patch or simulated execution result."
+                    )
                 messages.extend((
                     TextMessage(role="assistant", content=reply.content),
                     TextMessage(
@@ -99,6 +109,7 @@ class TextActionRelay:
                             "The previous serialization was invalid and nothing was executed. "
                             "Retry the response. If an operation is needed, use one final closed "
                             "@@ACTION@@ JSON envelope with an allowed operation and schema-valid parameters."
+                            + diagnostic
                         ),
                     ),
                 ))

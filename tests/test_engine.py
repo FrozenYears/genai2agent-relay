@@ -1,3 +1,4 @@
+import json
 import unittest
 
 from relay.actions import ActionTransportError, ToolSpec
@@ -36,6 +37,40 @@ class EngineTests(unittest.TestCase):
         relay = TextActionRelay(Backend("No call"), retries=0, max_action_bytes=4096)
         with self.assertRaises(ActionTransportError):
             relay.run(request)
+
+    def test_json_retry_locates_outer_envelope_and_can_recover(self):
+        bad_body = '{"calls":[{"operation":"ping","parameters":{"text":"@@ACTION@@"},{"operation":"ping","parameters":{}}]}'
+        bad = '@@ACTION@@' + bad_body + '@@END_ACTION@@'
+        good = '@@ACTION@@{"calls":[{"operation":"ping","parameters":{}}]}@@END_ACTION@@'
+        try:
+            json.loads(bad_body)
+        except json.JSONDecodeError as error:
+            location = f'line {error.lineno}, column {error.colno}'
+            reason = error.msg
+        request = RelayRequest(
+            model='model', messages=(TextMessage(role='user', content='ping'),),
+            tools=(ToolSpec('ping', '', {'type': 'object'}),),
+        )
+        for final_reply in (good, bad):
+            with self.subTest(recovered=final_reply == good):
+                attempts = []
+
+                class RetryingBackend:
+                    def complete(self, attempt):
+                        attempts.append(attempt)
+                        return UpstreamReply(bad if len(attempts) == 1 else final_reply)
+
+                relay = TextActionRelay(RetryingBackend(), retries=1, max_action_bytes=4096)
+                if final_reply == good:
+                    self.assertEqual(relay.run(request).action.calls[0].name, 'ping')
+                else:
+                    with self.assertRaises(ActionTransportError):
+                        relay.run(request)
+                self.assertEqual(len(attempts), 2)
+                feedback = attempts[1].messages[-1].content
+                self.assertIn(location, feedback)
+                self.assertIn(reason, feedback)
+                self.assertNotIn(bad_body, feedback)
 
 
 if __name__ == "__main__":

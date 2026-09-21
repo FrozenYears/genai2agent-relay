@@ -147,15 +147,18 @@ def decode_action(text: str, tools: list[ToolSpec], max_bytes: int) -> DecodedAc
     cursor = body_end
     body = None
     body_start = -1
+    json_error: json.JSONDecodeError | None = None
     while True:
         start = stripped.rfind(ACTION_OPEN, first_action, cursor)
         if start < 0:
-            raise ActionTransportError("Action envelope contains malformed JSON")
+            raise ActionTransportError("Action envelope contains malformed JSON") from json_error
         try:
             body = json.loads(stripped[start + len(ACTION_OPEN):body_end])
             body_start = start
             break
-        except json.JSONDecodeError:
+        except json.JSONDecodeError as exc:
+            # 回溯到较早的封套起点，避免将参数内嵌标记的解析错误当作最终诊断。
+            json_error = exc
             cursor = start
 
     if not isinstance(body, dict) or set(body) != {"calls"}:
