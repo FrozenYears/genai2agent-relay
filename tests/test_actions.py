@@ -50,6 +50,9 @@ class ActionTests(unittest.TestCase):
             f'Example ``{envelope}``',
             f'```json\n{envelope}\n```',
             f'~~~json\n{envelope}\n~~~',
+            'Example `@@ACTION@{...}@@END_ACTION@@`',
+            '```text\n@@ACTION@{...}@@END_ACTION@@\n```',
+            '结束标记是 `@@END_ACTION@@`。',
         ]
         for text in examples:
             with self.subTest(text=text):
@@ -58,7 +61,7 @@ class ActionTests(unittest.TestCase):
                 self.assertEqual(result.calls, ())
 
     def test_real_call_after_example_preserves_markdown_parameters(self):
-        command = 'echo "`code` ``` @@ACTION@@ @@END_ACTION@@"\nnext'
+        command = 'echo "`code` ``` @@ACTION@ @@ACTION@@ @@END_ACTION@@"\nnext'
         prefix = 'Example `@@ACTION@@{...}@@END_ACTION@@`.\n'
         payload = json.dumps({'calls': [{'operation': 'Bash', 'parameters': {'command': command}}]})
         result = decode_action(prefix + '@@ACTION@@' + payload + '@@END_ACTION@@', TOOLS, 4096)
@@ -71,6 +74,16 @@ class ActionTests(unittest.TestCase):
             with self.subTest(suffix=suffix):
                 with self.assertRaises(ActionTransportError):
                     decode_action(prefix + suffix, TOOLS, 4096)
+
+    def test_damaged_delimiters_are_not_plain_text(self):
+        for text in [
+            '@@ACTION@{"calls":[]}@@END_ACTION@@',
+            '@@ACTION@{"calls":[]}',
+            '{"calls":[]}@@END_ACTION@@',
+            'Example `@@ACTION@` then @@END_ACTION@@',
+        ]:
+            with self.subTest(text=text), self.assertRaises(ActionTransportError):
+                decode_action(text, TOOLS, 4096)
 
     def test_rejects_incomplete_unknown_and_schema_invalid_actions(self):
         invalid = [

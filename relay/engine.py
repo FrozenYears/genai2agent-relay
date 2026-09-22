@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 from typing import Any, Protocol
 
 from .actions import (
+    ActionDelimiterError,
     ActionTransportError,
     DecodedAction,
     ToolSpec,
@@ -111,6 +112,12 @@ class TextActionRelay:
                         f"(line {error.lineno}, column {error.colno} within the JSON body). "
                         "Check the JSON structure at that position and resend the complete envelope, "
                         "not a patch or simulated execution result."
+                    )
+                elif isinstance(exc, ActionDelimiterError):
+                    diagnostic = (
+                        " The action opening marker is malformed or missing; it must be exactly @@ACTION@@. "
+                        "Please continue and resend the complete envelope ending with @@END_ACTION@@. "
+                        "Correctly escape quotes, backslashes and newlines inside JSON strings."
                     )
                 messages.extend((
                     TextMessage(role="assistant", content=reply.content),

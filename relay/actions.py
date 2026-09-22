@@ -19,6 +19,10 @@ class ActionTransportError(ValueError):
     pass
 
 
+class ActionDelimiterError(ActionTransportError):
+    pass
+
+
 @dataclass(frozen=True)
 class ToolSpec:
     name: str
@@ -115,7 +119,7 @@ _ACTION_OR_CODE = re.compile(
     r"^ {0,3}(?P<fence>`{3,}|~{3,})[^\n]*\n"
     r".*?^ {0,3}(?P=fence)[ \t]*(?:\n|$)"
     r"|(?<!`)(?P<ticks>`+)(?!`)[^\n]*?(?<!`)(?P=ticks)(?!`)"
-    r"|@@ACTION@@",
+    r"|@@ACTION@@|@@ACTION@(?!@)|@@END_ACTION@@",
     re.MULTILINE | re.DOTALL,
 )
 
@@ -125,6 +129,10 @@ def _first_action_start(text: str) -> int:
     for match in _ACTION_OR_CODE.finditer(text):
         if match.group() == ACTION_OPEN:
             return match.start()
+        if match.group() in {"@@ACTION@", ACTION_CLOSE}:
+            raise ActionDelimiterError(
+                "Action envelope has a malformed or missing opening marker; expected @@ACTION@@"
+            )
     return -1
 
 

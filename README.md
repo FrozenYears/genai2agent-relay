@@ -52,6 +52,7 @@ executes a command, reads a requested file, or invokes a submitted tool.
 - Parameters are validated against the tool's supplied JSON Schema.
 - Partial, oversized, malformed, unknown, and native-token calls are rejected.
 - Invalid model serialization can be retried before any call is returned.
+- Outside closed code quotations, `@@ACTION@` and an end marker before a valid opening marker trigger serialization retry instead of plain-text completion. Delimiters are never auto-repaired for execution.
 - Request bodies, arguments, and credentials are not logged.
 
 This is a transport boundary, not a permission system. The downstream client
