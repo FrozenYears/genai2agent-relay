@@ -47,7 +47,7 @@ class AlternateCallTests(unittest.TestCase):
                         return UpstreamReply(bad if self.attempts == 1 else final)
 
                 backend = Backend()
-                client = create_app(RelayConfig(upstream_base_url='http://unused.invalid'), backend).test_client()
+                client = create_app(RelayConfig(upstream_base_url='http://unused.invalid', upstream_action_retries=1), backend).test_client()
                 response = client.post('/v1/messages', json={
                     'model': 'test', 'stream': True,
                     'messages': [{'role': 'user', 'content': 'check'}],

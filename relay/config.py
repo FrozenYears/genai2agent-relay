@@ -34,7 +34,7 @@ class RelayConfig:
     port: int = 31110
     upstream_connect_timeout: float = 10.0
     upstream_read_timeout: float = 1800.0
-    upstream_action_retries: int = 1
+    upstream_action_retries: int = 2
     max_action_bytes: int = 1_048_576
 
     def __post_init__(self) -> None:
@@ -57,6 +57,6 @@ class RelayConfig:
             port=int(os.environ.get("PORT", "31110")),
             upstream_connect_timeout=_positive_float("UPSTREAM_CONNECT_TIMEOUT", 10.0),
             upstream_read_timeout=_positive_float("UPSTREAM_READ_TIMEOUT", 1800.0),
-            upstream_action_retries=_nonnegative_int("UPSTREAM_ACTION_RETRIES", 1),
+            upstream_action_retries=_nonnegative_int("UPSTREAM_ACTION_RETRIES", 2),
             max_action_bytes=_nonnegative_int("MAX_ACTION_BYTES", 1_048_576),
         )

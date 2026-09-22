@@ -246,7 +246,7 @@ back to their own response format.
 | `PORT` | `31110` | Listen port |
 | `UPSTREAM_CONNECT_TIMEOUT` | `10` | Connection timeout in seconds |
 | `UPSTREAM_READ_TIMEOUT` | `1800` | Completion timeout in seconds |
-| `UPSTREAM_ACTION_RETRIES` | `1` | Retries after invalid serialization |
+| `UPSTREAM_ACTION_RETRIES` | `2` | Shared retries after invalid serialization or empty replies; at most 3 attempts total. Length truncation is not retried. |
 | `MAX_ACTION_BYTES` | `1048576` | Maximum buffered response size |
 
 Keep both hops on loopback unless remote access is protected with TLS,
