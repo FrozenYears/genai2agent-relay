@@ -60,6 +60,8 @@ must still authorize and sandbox tool execution.
 
 JSON syntax retries include the parse reason and location within the envelope body; their client-facing errors are unchanged. Empty or reasoning-only replies request continuation using the same retry budget instead of ending the turn successfully; exhaustion returns an upstream error. Normal text replies remain valid without tools. See [封套与纯思考回复小修记录](docs/action-envelope-fixes.zh-CN.md) for comparisons, verification, and rollback.
 
+The full current tool schemas are appended near the latest user turn instead of the start of history; original instructions, history, and attachments are retained. Structural/parameter retries include actionable feedback and the relevant tool schema when identifiable, without translating arguments automatically. An upstream `finish_reason=length` is rejected immediately with an explicit truncation error, even if a complete-looking call is present: no same-budget serialization retry or partial execution. No additional logging, dependencies, or retry allowance is introduced.
+
 ## Run the two-hop setup
 
 First start `jollyxenon/shanghaitech-genai2api` according to its own README. It

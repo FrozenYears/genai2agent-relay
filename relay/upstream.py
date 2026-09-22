@@ -57,6 +57,7 @@ class UpstreamClient:
             content=message.get("content") or "",
             reasoning=message.get("reasoning_content") or "",
             usage=data.get("usage") if isinstance(data.get("usage"), dict) else {},
+            finish_reason=data["choices"][0].get("finish_reason"),
         )
 
     def models(self) -> dict[str, Any]:

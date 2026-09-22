@@ -7,11 +7,11 @@ from typing import Any, Protocol
 from .actions import (
     ActionDelimiterError,
     ActionTransportError,
+    ActionValidationError,
     DecodedAction,
     ToolSpec,
     decode_action,
     render_action_prompt,
-    render_action_reminder,
 )
 from .content import append_text, prepend_text
 
@@ -41,6 +41,7 @@ class UpstreamReply:
     content: str
     reasoning: str = ""
     usage: dict[str, Any] = field(default_factory=dict)
+    finish_reason: str | None = None
 
 
 @dataclass(frozen=True)
@@ -83,6 +84,12 @@ class TextActionRelay:
                 options=request.upstream_options,
             )
             reply = self.backend.complete(attempt_request)
+            # 截断不属于序列化错误；不以相同预算盲目重试，也不交付可能未完成的操作。
+            if reply.finish_reason == "length":
+                raise ActionTransportError(
+                    "First-hop output was truncated (finish_reason=length); "
+                    "no actions were delivered. Review max_tokens (includes reasoning)."
+                )
             try:
                 if not reply.content.strip():
                     raise ActionTransportError("First-hop model returned no answer or action")
@@ -119,6 +126,10 @@ class TextActionRelay:
                         "Please continue and resend the complete envelope ending with @@END_ACTION@@. "
                         "Correctly escape quotes, backslashes and newlines inside JSON strings."
                     )
+                elif isinstance(exc, ActionValidationError):
+                    diagnostic = " " + exc.feedback
+                    if exc.tool is not None:
+                        diagnostic += "\n" + render_action_prompt([exc.tool], request.tool_choice)
                 messages.extend((
                     TextMessage(role="assistant", content=reply.content),
                     TextMessage(
@@ -137,9 +148,6 @@ class TextActionRelay:
     def _prepare_messages(request: RelayRequest) -> list[TextMessage]:
         messages = list(request.messages)
         instructions = request.instructions.strip()
-        if request.tools and request.tool_choice != "none":
-            prompt = render_action_prompt(list(request.tools), request.tool_choice)
-            instructions = f"{instructions}\n\n{prompt}" if instructions else prompt
 
         if instructions:
             context = "Operating instructions:\n" + instructions
@@ -154,7 +162,7 @@ class TextActionRelay:
                 )
 
         if request.tools and request.tool_choice != "none":
-            reminder = render_action_reminder()
+            reminder = render_action_prompt(list(request.tools), request.tool_choice)
             last_user = next(
                 (index for index in range(len(messages) - 1, -1, -1) if messages[index].role == "user"),
                 None,

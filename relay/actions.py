@@ -23,6 +23,13 @@ class ActionDelimiterError(ActionTransportError):
     pass
 
 
+class ActionValidationError(ActionTransportError):
+    def __init__(self, message: str, feedback: str, tool: ToolSpec | None = None) -> None:
+        super().__init__(message)
+        self.feedback = feedback
+        self.tool = tool
+
+
 @dataclass(frozen=True)
 class ToolSpec:
     name: str
@@ -91,18 +98,15 @@ def render_action_prompt(tools: list[ToolSpec], choice: str | None = None) -> st
         + "\nTo request execution, end your response with exactly one envelope in this form:\n"
         '@@ACTION@@{"calls":[{"operation":"OperationName","parameters":{}}]}@@END_ACTION@@\n'
         "The envelope is ordinary text. Use operation names and parameters from the schemas. "
+        "These are the current request's authoritative tool definitions; do not substitute "
+        "remembered interfaces for tools with similar names. Each calls item must contain "
+        "exactly operation and parameters, not name, arguments, function or id. "
         "Multiple independent operations may share the calls array. Do not use XML, markdown "
         "fences, native special tokens, or simulated results. A promised action without the "
         f"envelope will not execute. {choice_text}"
     )
 
 
-def render_action_reminder() -> str:
-    return (
-        "Runtime serialization reminder: an operation must be ordinary text ending with "
-        '@@ACTION@@{"calls":[{"operation":"...","parameters":{...}}]}@@END_ACTION@@. '
-        "Do not use a native function channel and do not merely announce the operation."
-    )
 
 
 def encode_calls(calls: list[dict[str, Any]]) -> str:
@@ -170,28 +174,55 @@ def decode_action(text: str, tools: list[ToolSpec], max_bytes: int) -> DecodedAc
             cursor = start
 
     if not isinstance(body, dict) or set(body) != {"calls"}:
-        raise ActionTransportError("Action envelope must contain only a calls field")
+        raise ActionValidationError(
+            "Action envelope must contain only a calls field",
+            'Resend one object with exactly a calls field: {"calls":[{"operation":"...","parameters":{}}]}.',
+        )
     raw_calls = body["calls"]
     if not isinstance(raw_calls, list) or not raw_calls:
-        raise ActionTransportError("Action calls must be a non-empty array")
+        raise ActionValidationError("Action calls must be a non-empty array", "The calls field must be a non-empty array of operation objects.")
 
     by_name = {tool.name: tool for tool in tools}
     calls: list[ActionCall] = []
-    for raw_call in raw_calls:
+    for index, raw_call in enumerate(raw_calls):
         if not isinstance(raw_call, dict) or set(raw_call) != {"operation", "parameters"}:
-            raise ActionTransportError("Each call must contain operation and parameters")
+            tool = by_name.get(raw_call.get("operation")) if isinstance(raw_call, dict) and isinstance(raw_call.get("operation"), str) else None
+            raise ActionValidationError(
+                "Each call must contain operation and parameters",
+                f'calls[{index}] must be an object with exactly operation and parameters. '
+                'Use {"operation":"AllowedOperationName","parameters":{}}; '
+                "do not use name, arguments, function, id or extra wrapper fields. Resend the complete envelope.",
+                tool,
+            )
         name = raw_call["operation"]
         parameters = raw_call["parameters"]
         if not isinstance(name, str) or name not in by_name:
-            raise ActionTransportError(f"Operation is not allowed: {name!r}")
+            raise ActionValidationError(
+                f"Operation is not allowed: {name!r}",
+                f"calls[{index}].operation must be one of {json.dumps(list(by_name), ensure_ascii=False)}. "
+                "Use the current request's tool definitions and resend the complete envelope.",
+            )
         if not isinstance(parameters, dict):
-            raise ActionTransportError("Operation parameters must be a JSON object")
+            raise ActionValidationError(
+                "Operation parameters must be a JSON object",
+                f"calls[{index}].parameters must be an object, not a serialized string or array. Resend the complete envelope.",
+                by_name[name],
+            )
         tool = by_name[name]
         try:
             validate(instance=parameters, schema=_transport_schema(tool))
         except ValidationError as exc:
             path = ".".join(str(part) for part in exc.absolute_path) or "parameters"
-            raise ActionTransportError(f"Invalid parameters for {name} at {path}: {exc.message}") from exc
+            missing = [key for key in _transport_schema(tool).get("required", []) if key not in parameters]
+            if exc.validator == "required" and isinstance(exc.instance, dict):
+                missing = [key for key in exc.validator_value if key not in exc.instance]
+            raise ActionValidationError(
+                f"Invalid parameters for {name} at {path}: {exc.message}",
+                f"calls[{index}] parameters failed the {exc.validator} constraint at {path}. "
+                + (f"Missing required fields: {json.dumps(missing, ensure_ascii=False)}. " if missing else "")
+                + "Use the supplied current schema, not a remembered interface. Resend the complete envelope.",
+                tool,
+            ) from exc
         calls.append(ActionCall(name=name, parameters=parameters, kind=tool.kind))
 
     return DecodedAction(text=stripped[:body_start].rstrip(), calls=tuple(calls))
