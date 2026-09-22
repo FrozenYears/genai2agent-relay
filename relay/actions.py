@@ -140,6 +140,49 @@ def _first_action_start(text: str) -> int:
     return -1
 
 
+_ALTERNATE_CALL_BLOCK = re.compile(
+    r"^ {0,3}(?P<fence>`{3,}|~{3,})(?:json)?[ \t]*\n"
+    r"(?P<code>.*?)(?:^ {0,3}(?P=fence)[ \t]*(?:\n|$)|\Z)"
+    r"|<parameter\s+name=[\"']calls[\"']\s*>(?P<xml>.*?)</parameter\s*>",
+    re.MULTILINE | re.DOTALL,
+)
+
+
+def _reject_alternate_calls(text: str, tools: list[ToolSpec]) -> None:
+    names = {tool.name for tool in tools}
+    if not names:
+        return
+    for match in _ALTERNATE_CALL_BLOCK.finditer(text):
+        body = (match.group("code") or match.group("xml") or "").strip()
+        try:
+            value = json.loads(body)
+        except json.JSONDecodeError:
+            # 损坏 JSON 只匹配明确的首个调用前缀；不修复、不执行。
+            prefix = re.match(r'^\[\s*\{\s*"operation"\s*:\s*("(?:[^"\\]|\\.)*")\s*,\s*"parameters"\s*:\s*\{', body)
+            if not prefix:
+                continue
+            try:
+                name = json.loads(prefix.group(1))
+            except json.JSONDecodeError:
+                continue
+            calls = [{"operation": name, "parameters": {}}]
+        else:
+            calls = value.get("calls") if isinstance(value, dict) else value
+        if isinstance(calls, list) and calls and all(
+            isinstance(call, dict)
+            and isinstance(call.get("operation"), str)
+            and call["operation"] in names
+            and isinstance(call.get("parameters"), dict)
+            for call in calls
+        ):
+            raise ActionValidationError(
+                "Tool calls were emitted in a code block or XML instead of an action envelope",
+                'Calls in Markdown or <parameter name="calls"> were not executed. Please continue: '
+                'resend the complete calls in @@ACTION@@{"calls":[...]}@@END_ACTION@@, '
+                "without code fences or XML. Do not merely describe the operations.",
+            )
+
+
 def decode_action(text: str, tools: list[ToolSpec], max_bytes: int) -> DecodedAction:
     if not isinstance(text, str):
         raise ActionTransportError("Upstream response content is not text")
@@ -151,6 +194,7 @@ def decode_action(text: str, tools: list[ToolSpec], max_bytes: int) -> DecodedAc
     stripped = text.rstrip()
     first_action = _first_action_start(stripped)
     if first_action < 0:
+        _reject_alternate_calls(stripped, tools)
         return DecodedAction(text=stripped, calls=())
     if not stripped.endswith(ACTION_CLOSE):
         raise ActionTransportError("Action envelope is incomplete or is not final")
