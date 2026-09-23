@@ -101,15 +101,7 @@ class TextActionRelay:
                 if attempt >= self.retries:
                     raise
                 if not reply.content.strip():
-                    # 不把思考转为正文，也不向历史追加空的 assistant 消息。
-                    messages.append(TextMessage(
-                        role="user",
-                        content=(
-                            "上一次没有返回正文或实际工具调用，未执行任何操作。请继续。"
-                            "如果需要操作，请输出完整合法的 @@ACTION@@ JSON 封套，"
-                            "并以 @@END_ACTION@@ 结束；不要只输出思考或行动计划。"
-                        ),
-                    ))
+                    self._append_continuation(messages)
                     continue
                 diagnostic = ""
                 if isinstance(exc.__cause__, json.JSONDecodeError):
@@ -176,6 +168,26 @@ class TextActionRelay:
                     content=append_text(original.content, reminder),
                 )
         return messages
+
+    @staticmethod
+    def _append_continuation(messages: list[TextMessage]) -> None:
+        prompt = (
+            "\n\n上一次请求已结束，但没有返回正文或实际工具调用，未执行任何操作。请继续。"
+            "如果需要操作，请输出完整合法的 @@ACTION@@ JSON 封套，"
+            "并以 @@END_ACTION@@ 结束；不要只输出思考或行动计划。"
+        )
+        last_user = next(
+            (index for index in range(len(messages) - 1, -1, -1) if messages[index].role == "user"),
+            None,
+        )
+        if last_user is None:
+            messages.append(TextMessage(role="user", content=prompt.lstrip()))
+            return
+        original = messages[last_user]
+        messages[last_user] = TextMessage(
+            role="user",
+            content=append_text(original.content, prompt),
+        )
 
     @staticmethod
     def _validate_choice(decoded: DecodedAction, choice: str) -> None:

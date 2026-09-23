@@ -112,6 +112,28 @@ class EngineTests(unittest.TestCase):
                 if replies[0] == thinking and retries:
                     self.assertTrue(all(m.content.strip() for m in attempts[1].messages))
                     self.assertNotIn(thinking.reasoning, [m.content for m in attempts[1].messages])
+    def test_empty_retry_appends_to_current_user_instead_of_adding_user_turn(self):
+        request = RelayRequest(
+            model='model', messages=(
+                TextMessage('user', 'current task'),
+                TextMessage('assistant', 'previous answer'),
+                TextMessage('user', 'latest task'),
+            ),
+        )
+        attempts = []
+
+        class Backend:
+            def complete(self, attempt):
+                attempts.append(attempt)
+                return UpstreamReply('', reasoning='thinking') if len(attempts) == 1 else UpstreamReply('done')
+
+        result = TextActionRelay(Backend(), retries=1, max_action_bytes=4096).run(request)
+        self.assertEqual(result.action.text, 'done')
+        self.assertEqual([message.role for message in attempts[1].messages], ['user', 'assistant', 'user'])
+        self.assertIn('latest task', attempts[1].messages[-1].content)
+        self.assertIn('请继续', attempts[1].messages[-1].content)
+        self.assertNotIn('thinking', attempts[1].messages[-1].content)
+
 
 
 if __name__ == "__main__":
