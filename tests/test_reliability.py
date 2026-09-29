@@ -94,5 +94,44 @@ class ReliabilityTests(unittest.TestCase):
                 self.assertEqual(session.count, 1)
 
 
+    def test_every_invalid_call_is_reported_in_one_retry(self):
+        # 一次封套里多个调用都非法时，应在同一次重试提示里全部指出，
+        # 而不是每轮只报第一个、耗尽共享重试预算。
+        invalid = encode_calls([
+            {'operation': 'edit', 'parameters': {'old_string': 'x'}},
+            {'operation': 'not_a_tool', 'parameters': {}},
+        ])
+        valid = encode_calls([{'operation': 'edit', 'parameters': {'input': 'patch'}}])
+        backend = Backend([UpstreamReply(invalid), UpstreamReply(valid)])
+        result = TextActionRelay(backend, 1, 4096).run(RelayRequest(
+            model='test', messages=(TextMessage('user', 'edit'),), tools=(EDIT,),
+        ))
+        self.assertEqual(result.action.calls[0].parameters, {'input': 'patch'})
+        feedback = backend.requests[1].messages[-1].content
+        self.assertIn('calls[0]', feedback)
+        self.assertIn('calls[1]', feedback)
+        self.assertIn('Missing required fields', feedback)
+        self.assertIn('must be one of', feedback)
+        # 既有契约：不回显非法工具名，只列出当前允许的名字。
+        self.assertNotIn('not_a_tool', feedback)
+
+    def test_one_invalid_call_blocks_its_valid_siblings_without_execution(self):
+        # 仍保持原子性：合法兄弟调用不得先执行，整封套重发后才交付。
+        mixed = encode_calls([
+            {'operation': 'edit', 'parameters': {'input': 'patch'}},
+            {'operation': 'edit', 'parameters': {'old_string': 'x'}},
+        ])
+        valid = encode_calls([{'operation': 'edit', 'parameters': {'input': 'patch'}}])
+        backend = Backend([UpstreamReply(mixed), UpstreamReply(valid)])
+        result = TextActionRelay(backend, 1, 4096).run(RelayRequest(
+            model='test', messages=(TextMessage('user', 'edit'),), tools=(EDIT,),
+        ))
+        self.assertEqual(backend.requests.__len__(), 2)
+        self.assertEqual(result.action.calls[0].parameters, {'input': 'patch'})
+        feedback = backend.requests[1].messages[-1].content
+        self.assertIn('calls[1]', feedback)
+        self.assertNotIn('calls[0]', feedback)
+
+
 if __name__ == '__main__':
     unittest.main()

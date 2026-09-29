@@ -228,30 +228,38 @@ def decode_action(text: str, tools: list[ToolSpec], max_bytes: int) -> DecodedAc
 
     by_name = {tool.name: tool for tool in tools}
     calls: list[ActionCall] = []
+    # 一次封套内的所有非法调用都要在同一次重试提示中列出；
+    # 但整封套仍是原子的：任一调用非法则全部不交付、不执行。
+    failures: list[str] = []
+    summary: list[str] = []
+    failure_tool: ToolSpec | None = None
     for index, raw_call in enumerate(raw_calls):
         if not isinstance(raw_call, dict) or set(raw_call) != {"operation", "parameters"}:
             tool = by_name.get(raw_call.get("operation")) if isinstance(raw_call, dict) and isinstance(raw_call.get("operation"), str) else None
-            raise ActionValidationError(
-                "Each call must contain operation and parameters",
+            failure_tool = failure_tool or tool
+            summary.append("Each call must contain operation and parameters")
+            failures.append(
                 f'calls[{index}] must be an object with exactly operation and parameters. '
                 'Use {"operation":"AllowedOperationName","parameters":{}}; '
-                "do not use name, arguments, function, id or extra wrapper fields. Resend the complete envelope.",
-                tool,
+                "do not use name, arguments, function, id or extra wrapper fields. Resend the complete envelope."
             )
+            continue
         name = raw_call["operation"]
         parameters = raw_call["parameters"]
         if not isinstance(name, str) or name not in by_name:
-            raise ActionValidationError(
-                f"Operation is not allowed: {name!r}",
+            summary.append(f"Operation is not allowed: {name!r}")
+            failures.append(
                 f"calls[{index}].operation must be one of {json.dumps(list(by_name), ensure_ascii=False)}. "
-                "Use the current request's tool definitions and resend the complete envelope.",
+                "Use the current request's tool definitions and resend the complete envelope."
             )
+            continue
         if not isinstance(parameters, dict):
-            raise ActionValidationError(
-                "Operation parameters must be a JSON object",
-                f"calls[{index}].parameters must be an object, not a serialized string or array. Resend the complete envelope.",
-                by_name[name],
+            failure_tool = failure_tool or by_name[name]
+            summary.append("Operation parameters must be a JSON object")
+            failures.append(
+                f"calls[{index}].parameters must be an object, not a serialized string or array. Resend the complete envelope."
             )
+            continue
         tool = by_name[name]
         try:
             validate(instance=parameters, schema=_transport_schema(tool))
@@ -260,13 +268,17 @@ def decode_action(text: str, tools: list[ToolSpec], max_bytes: int) -> DecodedAc
             missing = [key for key in _transport_schema(tool).get("required", []) if key not in parameters]
             if exc.validator == "required" and isinstance(exc.instance, dict):
                 missing = [key for key in exc.validator_value if key not in exc.instance]
-            raise ActionValidationError(
-                f"Invalid parameters for {name} at {path}: {exc.message}",
+            failure_tool = failure_tool or tool
+            summary.append(f"Invalid parameters for {name} at {path}: {exc.message}")
+            failures.append(
                 f"calls[{index}] parameters failed the {exc.validator} constraint at {path}. "
                 + (f"Missing required fields: {json.dumps(missing, ensure_ascii=False)}. " if missing else "")
-                + "Use the supplied current schema, not a remembered interface. Resend the complete envelope.",
-                tool,
-            ) from exc
+                + "Use the supplied current schema, not a remembered interface. Resend the complete envelope."
+            )
+            continue
         calls.append(ActionCall(name=name, parameters=parameters, kind=tool.kind))
+
+    if failures:
+        raise ActionValidationError("; ".join(summary), " ".join(failures), failure_tool)
 
     return DecodedAction(text=stripped[:body_start].rstrip(), calls=tuple(calls))
