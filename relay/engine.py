@@ -13,7 +13,7 @@ from .actions import (
     decode_action,
     render_action_prompt,
 )
-from .content import append_text, prepend_text
+from .content import append_text, escape_action_markers, prepend_text
 
 
 @dataclass(frozen=True)
@@ -139,6 +139,12 @@ class TextActionRelay:
     @staticmethod
     def _prepare_messages(request: RelayRequest) -> list[TextMessage]:
         messages = list(request.messages)
+        if request.tools and request.tool_choice != "none":
+            messages = [
+                TextMessage(message.role, escape_action_markers(message.content))
+                if message.role == "user" else message
+                for message in messages
+            ]
         instructions = request.instructions.strip()
 
         if instructions:

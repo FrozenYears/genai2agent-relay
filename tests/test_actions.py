@@ -2,6 +2,7 @@ import json
 import unittest
 
 from relay.actions import ActionTransportError, ToolSpec, decode_action
+from relay.content import escape_action_markers
 
 
 TOOLS = [
@@ -33,6 +34,29 @@ class ActionTests(unittest.TestCase):
         self.assertEqual(decoded.text, "Working.")
         self.assertEqual(decoded.calls[0].name, "Bash")
         self.assertEqual(decoded.calls[0].parameters, {"command": "pwd"})
+
+    def test_control_markers_round_trip_through_json_parameters(self):
+        original = '<think>keep</think> </tool_call> <|DSML|call> @@ACTION@@ @@END_ACTION@@\nunicode=雪'
+        escaped = escape_action_markers(original)
+        self.assertIn(r"\u003cthink\u003e", escaped)
+        tool = ToolSpec(
+            name="write_file",
+            description="Write a file",
+            parameters={
+                "type": "object",
+                "properties": {"path": {"type": "string"}, "content": {"type": "string"}},
+                "required": ["path", "content"],
+            },
+        )
+        payload = json.dumps({"calls": [{"operation": "write_file", "parameters": {
+            "path": "file.txt", "content": escaped,
+        }}]}, ensure_ascii=False)
+        payload = payload.replace(r"\\u003c", r"\u003c").replace(r"\\u003e", r"\u003e")
+        payload = payload.replace(r"\\u0040", r"\u0040")
+
+        decoded = decode_action("@@ACTION@@" + payload + "@@END_ACTION@@", [tool], 4096)
+
+        self.assertEqual(decoded.calls[0].parameters["content"], original)
 
     def test_quoted_bad_example_does_not_hide_final_action(self):
         decoded = decode_action(

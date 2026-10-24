@@ -14,11 +14,35 @@ should read as text goes through :func:`text_of`.
 from __future__ import annotations
 
 import json
+import re
 from typing import Any
-
 ATTACHMENT_TYPES = ("image_url", "file")
 _TEXT_TYPES = ("text", "input_text", "output_text", "summary_text")
 _ATTACHMENT_KINDS = ("image", "input_image", "document", "input_file")
+
+_ACTION_MARKER_RE = re.compile(
+    r"@@(?:END_)?ACTION@@|</?(?:think|tool_calls?|tool_result|tool_call_id|tool_\d+|arg_key|arg_value)\b[^>]*>|<[|｜][^>]*>",
+    re.IGNORECASE,
+)
+
+
+def escape_action_markers(content: Any) -> Any:
+    """Escape model-control-looking tags in user data without touching attachments."""
+    if isinstance(content, str):
+        def escape(match: re.Match[str]) -> str:
+            marker = match.group()
+            if marker.startswith("@@"):
+                return marker.replace("@", r"\u0040")
+            return marker.replace("<", r"\u003c").replace(">", r"\u003e")
+
+        return _ACTION_MARKER_RE.sub(escape, content)
+    if isinstance(content, (list, tuple)):
+        return [escape_action_markers(item) for item in content]
+    if isinstance(content, dict):
+        if content.get("type") in ATTACHMENT_TYPES or content.get("type") in _ATTACHMENT_KINDS:
+            return dict(content)
+        return {key: escape_action_markers(value) for key, value in content.items()}
+    return content
 
 
 def text_of(content: Any) -> str:

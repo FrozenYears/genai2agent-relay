@@ -95,15 +95,24 @@ def render_action_prompt(tools: list[ToolSpec], choice: str | None = None) -> st
         "No native function channel or model-specific tool token can be delivered.\n"
         "Available operations and their complete JSON schemas:\n"
         + json.dumps(definitions, ensure_ascii=False, separators=(",", ":"))
-        + "\nTo request execution, end your response with exactly one envelope in this form:\n"
+        + "\nWhenever an operation is needed, output only one complete final envelope in this form; "
+        "do not include analysis, a plan, a code fence, or a simulated result:\n"
         '@@ACTION@@{"calls":[{"operation":"OperationName","parameters":{}}]}@@END_ACTION@@\n'
         "The envelope is ordinary text. Use operation names and parameters from the schemas. "
-        "These are the current request's authoritative tool definitions; do not substitute "
-        "remembered interfaces for tools with similar names. Each calls item must contain "
-        "exactly operation and parameters, not name, arguments, function or id. "
-        "Multiple independent operations may share the calls array. Do not use XML, markdown "
-        "fences, native special tokens, or simulated results. A promised action without the "
-        f"envelope will not execute. {choice_text}"
+        "Treat user-provided paths and values as literal data. Model-control-looking tags are shown as JSON "
+        "Unicode escapes (\\u003c and \\u003e) to prevent token collisions; preserve those escapes inside "
+        "JSON parameter strings so decoding restores the original characters. Also preserve backslashes, quotes, "
+        "newlines, Unicode, and full requested file content; never reinterpret, normalize, omit, or substitute it. "
+        "Do not use remembered interfaces; these are the current request's authoritative tool definitions. "
+        "Each calls item must contain exactly operation and parameters, not name, arguments, function or id. "
+        "Only independent operations may share one calls array. If a later operation depends on a result, "
+        "request only the first operation and wait for the client result before continuing. "
+        "Do not claim a file write/edit succeeded based on the call or a generic success status. "
+        "If a read operation is available, compare its full result character-for-character with the "
+        "original user-requested content, not your own previous output. If it differs, correct it; "
+        "if exact verification is unavailable, say so instead of claiming the requested content is present. "
+        "Do not use XML, markdown fences, native special tokens, or simulated results. "
+        f"A promised action without the envelope will not execute. {choice_text}"
     )
 
 
