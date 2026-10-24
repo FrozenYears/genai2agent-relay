@@ -54,6 +54,7 @@ executes a command, reads a requested file, or invokes a submitted tool.
 - Invalid model serialization can be retried before any call is returned.
 - Outside closed code quotations, `@@ACTION@` and an end marker before a valid opening marker trigger serialization retry instead of plain-text completion. Delimiters are never auto-repaired for execution.
 - The action prompt asks models to emit only a complete envelope, preserve user-supplied strings literally, wait for dependent tool results, and read back file changes when a read operation is available. This is guidance, not semantic validation: the relay cannot prove that model-generated file contents match the user's intent, so clients must inspect tool results and verify important writes.
+- Native syntax checks exclude closed Markdown quotations and the parameters of a valid action envelope. A final verification answer may quote tool/DSML markers without starting another serialization retry. Result envelopes explicitly identify their content as the outcome of an already-executed operation; once verification is complete the model is instructed to answer normally rather than repeating the same read.
 - Request bodies, arguments, and credentials are not logged.
 
 This is a transport boundary, not a permission system. The downstream client

@@ -120,6 +120,25 @@ class ActionTests(unittest.TestCase):
             with self.subTest(value=value), self.assertRaises(ActionTransportError):
                 decode_action(value, TOOLS, 4096)
 
+    def test_verified_marker_examples_are_plain_text(self):
+        examples = [
+            'Verified: `<think>keep</think>`, `</tool_call>`, `<|DSML|call>`, `@@ACTION@@`, `@@END_ACTION@@`.',
+            'Verified file:\n```text\n<think>keep</think> </tool_call> <|DSML|call> @@ACTION@@ @@END_ACTION@@\n```',
+        ]
+        for content in examples:
+            with self.subTest(content=content):
+                result = decode_action(content, TOOLS, 4096)
+                self.assertEqual(result.text, content)
+                self.assertEqual(result.calls, ())
+
+    def test_native_marker_inside_valid_parameters_is_data(self):
+        command = 'echo "<tool_call> <|open|>call <｜DSML｜call>"'
+        payload = {"calls": [{"operation": "Bash", "parameters": {"command": command}}]}
+        result = decode_action(
+            "@@ACTION@@" + json.dumps(payload) + "@@END_ACTION@@", TOOLS, 4096
+        )
+        self.assertEqual(result.calls[0].parameters, {"command": command})
+
 
 if __name__ == "__main__":
     unittest.main()

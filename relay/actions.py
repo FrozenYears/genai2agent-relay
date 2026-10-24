@@ -111,6 +111,9 @@ def render_action_prompt(tools: list[ToolSpec], choice: str | None = None) -> st
         "If a read operation is available, compare its full result character-for-character with the "
         "original user-requested content, not your own previous output. If it differs, correct it; "
         "if exact verification is unavailable, say so instead of claiming the requested content is present. "
+        "Once all requested operations and read-back verification are complete, respond with a plain-text "
+        "final answer without an action envelope. Do not repeat a read that already verified the same "
+        "unchanged file. "
         "Do not use XML, markdown fences, native special tokens, or simulated results. "
         f"A promised action without the envelope will not execute. {choice_text}"
     )
@@ -125,7 +128,11 @@ def encode_calls(calls: list[dict[str, Any]]) -> str:
 
 def encode_result(call_id: str, output: Any, is_error: bool = False) -> str:
     payload = {"call_id": call_id, "output": output, "is_error": bool(is_error)}
-    return RESULT_OPEN + json.dumps(payload, ensure_ascii=False, separators=(",", ":")) + RESULT_CLOSE
+    return (
+        "This is an execution result from a tool that has already run, not a new user request. "
+        "Use this result to continue any unfinished work or give the final answer.\n"
+        + RESULT_OPEN + json.dumps(payload, ensure_ascii=False, separators=(",", ":")) + RESULT_CLOSE
+    )
 
 
 _ACTION_OR_CODE = re.compile(
@@ -197,11 +204,17 @@ def decode_action(text: str, tools: list[ToolSpec], max_bytes: int) -> DecodedAc
         raise ActionTransportError("Upstream response content is not text")
     if len(text.encode("utf-8")) > max_bytes:
         raise ActionTransportError("Upstream response exceeds MAX_ACTION_BYTES")
-    if any(marker in text for marker in NATIVE_MARKERS):
-        raise ActionTransportError("Native tool syntax cannot be delivered through this transport")
 
     stripped = text.rstrip()
     first_action = _first_action_start(stripped)
+    # 仅检查真实正文中的原生调用；引用与已闭合 JSON 参数里的标记是数据。
+    prefix = stripped[:first_action] if first_action >= 0 else stripped
+    syntax_text = _ACTION_OR_CODE.sub(
+        lambda match: "" if match.group("fence") or match.group("ticks") else match.group(),
+        prefix,
+    )
+    if any(marker in syntax_text for marker in NATIVE_MARKERS):
+        raise ActionTransportError("Native tool syntax cannot be delivered through this transport")
     if first_action < 0:
         _reject_alternate_calls(stripped, tools)
         return DecodedAction(text=stripped, calls=())
