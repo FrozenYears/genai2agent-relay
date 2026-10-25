@@ -18,6 +18,9 @@ and the website's text-based tool fallback. Its support for parsing Kimi/DeepSee
 native syntax does not prove that the website accepts native tool request fields.
 Upgrade both repositories together for the new default path.
 
+两跳端口、各层职责与重构前后差异见根项目的
+[原生优先阶段说明](../STAGE_NATIVE_FIRST.md)；阶段小验收不等同于正式服务长时实际工作验收。
+
 Use `UPSTREAM_TOOL_MODE=text` only for an explicitly text-only backend. This mode
 encodes tool definitions and history in ordinary conversation text. Historical
 calls retain their IDs and results refer to those IDs, including out-of-order
@@ -117,21 +120,15 @@ Run `genai2agent-relay` or `python main.py`. Client API bases are
 For Claude Code configuration see
 [the adapter reference](docs/claude-code-adapter-reference.zh-CN.md).
 
-## Direct authorized API backend
+## 当前上游范围
 
-A normal OpenAI-compatible Chat API can replace the website first hop. Set
-`UPSTREAM_BASE_URL` to its authorized API base and `UPSTREAM_API_KEY` to that API's
-own key, keeping native mode. A base without a path gets `/v1` appended; a base
-with a path (for example `/v1` or `/api/v1/start`) is used as-is. The adapter then
-appends `/chat/completions` or `/models`.
+本阶段因无法申请独立 API Key，明确放弃学校独立官方 API 路径，不再提供远程
+base 或绕过网页第一跳的接入方案。当前部署固定使用本地第一跳：
+`UPSTREAM_BASE_URL=http://127.0.0.1:31100`，并保持 `UPSTREAM_TOOL_MODE=native`。
 
-ShanghaiTech's [GenAI API / OpenClaw guide](https://aiplat.shanghaitech.edu.cn/_upload/article/files/9e/52/e8e9d4574a4386cb0ccf1614b548/fe158a03-d45e-41db-a895-d3400cf328bf.pdf)
-shows `https://genaiapi.shanghaitech.edu.cn/api/v1/start` as an example API base,
-with a separate personal API Key and network authorization. Use the actual
-approved endpoint and model ID. Do not reuse website JWTs or campus passwords.
-This documented university API route has not been exercised with an authorized
-API Key during the refactor; website-model verification is not evidence of that
-route's tool or reasoning capabilities.
+这不取消认证：学校网页登录 JWT／账号认证仍由第一跳管理；
+`UPSTREAM_API_KEY` 是第一跳的本地代理 Key，`RELAY_API_KEY` 是客户端访问
+relay 的本地 Key，二者不是学校独立 API Key。不要混用或向不相关服务发送凭据。
 
 ## API surface and first-hop features
 
@@ -153,9 +150,9 @@ claim that every attachment combination was revalidated in this refactor.
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `UPSTREAM_BASE_URL` | `http://127.0.0.1:31100` | Authorized upstream API base |
+| `UPSTREAM_BASE_URL` | `http://127.0.0.1:31100` | 本地第一跳地址；当前两跳链路必需 |
 | `UPSTREAM_TOOL_MODE` | `native` | `native` or explicit `text` fallback |
-| `UPSTREAM_API_KEY` | unset | Upstream Bearer key |
+| `UPSTREAM_API_KEY` | unset | 第一跳的本地 Bearer Key，与第一跳配置一致 |
 | `RELAY_API_KEY` | unset | Downstream Bearer or `x-api-key` |
 | `HOST` | `127.0.0.1` | Listen address |
 | `PORT` | `31110` | Listen port |

@@ -53,15 +53,19 @@ claude
 已经开放原生函数输入。第一跳仍负责网页所需的文本提示及严格原生标记解析。
 Messages 的 thinking signature 仍是兼容占位，不是 Anthropic 签名。
 
-## 文本后端与独立 API
+## 文本模式与当前上游范围
 
 只有确实使用纯文本后端时，才显式设置 `UPSTREAM_TOOL_MODE=text`。该模式将
 system/developer 转为普通上下文、工具定义追加到当前轮，并要求最终 action
 封套；保留调用 ID，不能再靠结果顺序猜测归属。native 失败不会自动降级或重放。
 
-若已获得学校独立 API 的授权，可将 `UPSTREAM_BASE_URL` 和 `UPSTREAM_API_KEY`
-改为获批 API base 与专属 Key，跳过网页第一跳。公开接入指南及边界见 README；
-网页登录 JWT、学号密码不能作为该 API 的 Key。
+本阶段因无法申请独立 API Key，明确放弃学校独立官方 API 路径，不使用远程
+base 或跳过第一跳的直连方案。`UPSTREAM_BASE_URL=http://127.0.0.1:31100`
+仍须保留，默认 `native` 不变。学校网页登录认证由第一跳负责；
+`UPSTREAM_API_KEY` 与 `RELAY_API_KEY` 均为本地代理鉴权，不是学校独立 API Key。
+
+完整链路及重构差异见根项目的 [原生优先阶段说明](../../STAGE_NATIVE_FIRST.md)。
+阶段短样本只能说明当时的协议行为，不能代替正式服务上的长时实际工作验收。
 
 ## 排错
 
