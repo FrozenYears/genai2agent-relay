@@ -8,17 +8,18 @@
 
 先启动当前版本的第一跳，再在 relay 的隔离环境中启动中继。两个仓库需一起升级。
 
-第一跳的空继续与时限在根项目配置，不要写入下面 relay 的 `.env`：
+第一跳恢复预算与时限在根项目配置，不要写入下面 relay 的 `.env`：
 
 | 第一跳环境变量 | 启动参数 | 默认值 | 含义 |
 | --- | --- | --- | --- |
-| `GENAI_EMPTY_CONTINUATIONS` | `--empty-continuations` | `3` | 额外次数，整数 `0..10`；含首次最多 4 次，0 仅禁用额外继续 |
-| `GENAI_TOOL_REQUEST_TIMEOUT_SECONDS` | `--tool-request-timeout` | `600` | 首次与所有继续共享的生成窗口（秒），有限正数 |
+| `GENAI_EMPTY_CONTINUATIONS` | `--empty-continuations` | `8` | 空完成额外次数，整数 `0..30` |
+| `GENAI_TOOL_REPAIR_ATTEMPTS` | `--tool-repair-attempts` | `3` | 未交付坏调用额外纠错，整数 `0..10` |
+| `GENAI_TOOL_REQUEST_TIMEOUT_SECONDS` | `--tool-request-timeout` | `900` | 首次、空继续和纠错共享秒数，有限正数 |
 
 第一跳 `Config` 拒绝布尔值配置。在根项目启动第一跳的示例：
 
 ```bash
-pixi run serve --empty-continuations 3 --tool-request-timeout 600
+pixi run serve --empty-continuations 8 --tool-repair-attempts 3 --tool-request-timeout 900
 ```
 
 随后在 relay 目录配置：
@@ -70,27 +71,17 @@ Messages 的 thinking signature 仍为 `genai-compat-no-signature` 兼容占位�
 Anthropic 签名；保留可表达的历史元数据不表示网页消费它们，也不能恢复跨供应商
 加密 reasoning 状态。Responses 不重建加密思考状态。
 
-### 空完成恢复与失败边界
+### 自动恢复与失败边界
 
-默认 native 模式只由第一跳处理严格空完成，relay 不叠加生成重试，避免预算相乘。
-仅启用工具协议恢复（`recover_empty=True`）且**零正文、零思考、零调用、正常
-`stop`**时可继续。默认额外 3 次、含首次最多 4 次；仍全部为空则返回
-`upstream_empty_response`。每次以原 `chatInfo` 加真实“第 k/N 次”标记及明确继续指令，
-完整原历史不变，不累积空 assistant 或旧继续提示，不换模型、不降级 text，
-不重放客户端工具。已产生正文/思考、坏 JSON/Schema、解析错误、断流或截断不重放。
+默认 native 只在第一跳恢复，relay 不叠加生成重试。严格空 stop（零原始正文/思考/调用）默认额外继续 8 次；正常结束但显式协议/JSON/Schema/选择约束不合法，且未交付正文/思考/工具批次，默认由模型纠错 3 次。两类预算独立累计且不重置，默认最多 12 代；代理不补参数、不修括号、不放行部分批次。
 
-所有工具协议请求从首次上游生成起共享默认 600 秒 deadline，不含附件预处理；
-ping/心跳、下一次继续都不续期，额外次数设为 0 也仍有总时限。到期即报
-`upstream_request_timeout`，即使已有输出或正在缓冲调用，也不交付未校验调用。
-普通无工具请求不空继续，也不施加这个工具请求总时限。
+原 `chatInfo` 加真实次数/安全校验反馈，完整原历史与约束不变，不积累虚构 assistant/tool 结果，不换模型、不降级 text、不重放客户端工具。已交付正文/思考、网络错误、断流、截断、取消或到期不重放；普通非空计划不被代理强行继续。失败或耗尽不发成功终态，空耗尽为 `upstream_empty_response`，纠错耗尽保留原错误码。
 
-第一跳网络 connect/read timeout 为 10/300 秒，relay 上游 read timeout 默认为
-1800 秒，都是网络等待约束，不是共享生成窗口；持续收到 ping 不代表永不超时。
-整场 Claude Code 任务可能跨多个请求和本地工具执行，也不等于该单请求窗口。
-次数或时间耗尽仍会中断当前 HTTP；代理报告真实失败而不伪造成功，客户端可根据
-完整历史、真实工具结果及错误显式继续。增加预算只覆盖未交付内容的空完成，
-并不保证学校平台不再空返或整场任务永不中断。完整 decision 图见
-[阶段说明第四节](../../STAGE_NATIVE_FIRST.md#4-sse-生命周期终态与取消)。
+所有工具协议生成共用默认 900 秒 deadline，不含附件预处理；ping/心跳、新一代和恢复类别切换不续期。到期为 `upstream_request_timeout`，不交付未校验调用。0 只关闭对应次数；普通无工具请求不使用这些预算/deadline。第一跳网络 connect/read 为 10/300 秒，relay read 默认1800秒，与该累计窗口及整场任务预算不同。
+
+代理不知道业务是否完成。根项目可选 omp 监督器使用独立真实验收，在协议失败、验收失败或停滞后自动反馈继续，默认额外8次、整场45分钟；单HTTP耗尽不必立即等待人工。它只用于显式启动的 omp 工作流，不自动改变 Claude Code 的工作循环。任务总预算耗尽或安全故障会保存检查点并明确停止，不无限重试、不伪报成功。当前没有跨进程自动恢复。
+
+完整状态图和安全边界见[架构第四节](../../STAGE_NATIVE_FIRST.md#4-sse-生命周期终态与取消)；监督器用法见[根 README](../../README.md#无需逐次人工输入的-omp-任务监督)。
 
 ## 文本模式与当前上游范围
 

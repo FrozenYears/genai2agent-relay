@@ -57,30 +57,18 @@ completion. Non-streaming failures return HTTP 502. Closing a consumed stream
 closes the upstream HTTP response. A blocked connection before response headers
 is still bounded by the configured timeouts, not guaranteed to cancel instantly.
 
-### 第一跳空继续预算与共享时限
+### 第一跳自动恢复与 agent 监督
 
-默认 native 链路的生成恢复只由第一跳负责，relay 不再叠加重试，防止两层预算相乘。
-只有启用工具协议恢复（`recover_empty=True`）且网页返回**零正文、零思考、零调用、
-正常 `stop`**，才消耗额外继续预算：默认额外 3 次，含首次最多 4 次；合法范围为
-`0..10`，0 仅禁用额外继续。持续为空并耗尽次数时返回 `upstream_empty_response`。
+默认 native 链路的恢复只由第一跳负责，relay 不叠加生成重试，避免预算相乘：
 
-每次继续保留完整原历史，以原 `chatInfo` 加真实“第 k/N 次”标记与明确继续指令，
-不累积空 assistant 或旧继续提示，不切模型、不降级 text，不重放客户端已执行工具。
-已经产生正文/思考、坏 JSON/Schema、解析错误、断流或截断均禁止重放。
-普通无工具请求不空继续，也不使用下述工具请求总时限。
+- 完全空完成：零原始正文/思考/调用且正常 `stop`，默认额外继续 8 次，范围 `0..30`。
+- 未交付坏调用：正常结束后发现显式协议/JSON/Schema/工具选择错误，且没有正文、思考或批次交付，默认由模型额外重新生成 3 次，范围 `0..10`；不猜参数、不修字符串、不放行部分批次。
 
-所有工具协议请求从首次上游生成开始共用默认 **600 秒**窗口，不含附件预处理；
-首次及所有继续共享 deadline，ping/心跳和继续次数都不续期。0 次额外继续仍受该窗口
-约束。即使已输出或正在缓冲调用，到期仍返回 `upstream_request_timeout`，
-不交付未校验调用。第一跳关闭已取得的实际 HTTP socket；尚未取得响应头的阻塞请求
-不能立即打断，但主响应按总时限失败，worker 返回后清理，不再发新继续。
+两类次数累计且不相互重置，默认每请求最多 `1+8+3=12` 代，共享 **900 秒**生成窗口，不含附件预处理；ping、心跳或新一代不续期。原问题加真实次数/安全错误反馈，完整原历史与工具约束不变，不积累虚构结果，不切模型、不降级 text，不重放客户端操作。已有正文/思考交付、网络错误、断流、截断、取消或到期不走纠错；非空计划不由代理猜成未完成。普通无工具请求没有这些恢复或工具 deadline。
 
-这与 relay 的 `UPSTREAM_READ_TIMEOUT` 不同：read timeout 限制网络读取间等待，
-持续 ping 可以避免它，却不会延长生成总窗口；整场 agent 任务可包含多次请求和
-本地工具执行，不以这个单请求窗口计时。次数或时间耗尽仍会中断当前 HTTP，
-代理不会假报任务完成。agent 可根据真实错误、完整历史和实际工具结果显式继续；
-增加预算仅恢复未交付内容的空完成，不保证平台始终可用或任务永不中断。
-恢复 decision 图见 [阶段说明第四节](../STAGE_NATIVE_FIRST.md#4-sse-生命周期终态与取消)。
+空预算耗尽为 `upstream_empty_response`，纠错预算耗尽保留具体错误码并说明耗尽，deadline 为 `upstream_request_timeout`；失败没有成功终态，未校验调用不交付。第一跳关闭已取得 socket；未取得响应头时主响应仍按窗口失败，worker 待底层请求返回后清理，不保证立即取消远端推理。网络 read timeout 与总窗口、整场 agent 任务预算是不同约束。
+
+根项目新增可选 [`supervise.py`](../validation/native-first-endurance/supervise.py)：真实 omp 每轮结束后运行操作者指定的独立验收，失败或停滞自动反馈继续，默认每任务额外 8 次、整场 45 分钟。HTTP 恢复耗尽不必立即等人，但整场预算耗尽、权限/身份故障或无法确认会话停稳会保存检查点并停止。它不自动接管任意客户端，不提供跨进程自动恢复，也不是 OS 沙箱。用法见[根 README](../README.md#无需逐次人工输入的-omp-任务监督)，状态边界见[架构第四节](../STAGE_NATIVE_FIRST.md#4-sse-生命周期终态与取消)。
 
 显式 text 模式只在正文/思考尚未交付时对明确坏封套作有限纠错；
 不重试空回答、断流、截断、普通示例或客户端工具执行，不是 native 失败的自动兜底。
@@ -199,13 +187,14 @@ Protect non-loopback deployments with TLS, authentication, and network policy.
 
 | 第一跳环境变量 | CLI 参数 | 默认值 | 约束 |
 | --- | --- | --- | --- |
-| `GENAI_EMPTY_CONTINUATIONS` | `--empty-continuations` | `3` | 额外次数，整数 `0..10`，含首次最多 `N+1` 次 |
-| `GENAI_TOOL_REQUEST_TIMEOUT_SECONDS` | `--tool-request-timeout` | `600` | 所有生成共用的秒数，有限正数，不含附件预处理 |
+| `GENAI_EMPTY_CONTINUATIONS` | `--empty-continuations` | `8` | 空完成额外次数，整数 `0..30` |
+| `GENAI_TOOL_REPAIR_ATTEMPTS` | `--tool-repair-attempts` | `3` | 未交付坏调用额外纠错，整数 `0..10` |
+| `GENAI_TOOL_REQUEST_TIMEOUT_SECONDS` | `--tool-request-timeout` | `900` | 首次与所有恢复共享秒数，有限正数，不含附件预处理 |
 
-第一跳 `Config` 校验拒绝上述两项的布尔值。第一跳启动示例（在根项目运行）：
+第一跳 `Config` 拒绝布尔值，0 只关闭对应恢复类别。第一跳启动示例（在根项目运行）：
 
 ```bash
-pixi run serve --empty-continuations 3 --tool-request-timeout 600
+pixi run serve --empty-continuations 8 --tool-repair-attempts 3 --tool-request-timeout 900
 ```
 
 第一跳单次网络 connect/read timeout 为 10/300 秒；relay 的 connect/read 设置仅约束
