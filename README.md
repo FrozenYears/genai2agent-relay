@@ -1,6 +1,28 @@
 # GenAI2AgentRelay
 
-双跳反代的第二跳：向客户端提供 Chat Completions、Messages 和 Responses 接口，与第一跳交换结构化工具和 SSE。
+GenAI2AgentRelay 是连接 agent 客户端与学校网页代理的本地 HTTP 服务。Claude Code、Codex、omp 等客户端把请求发到这里；relay 转给第一跳，再把模型回复和工具调用按客户端协议返回。
+
+它不自带模型、不登录学校账号，也不替客户端执行工具。
+
+```mermaid
+flowchart LR
+    A[agent 客户端] <-->|三种兼容协议| R["第二跳 · 31110<br/>genai2agent-relay"]
+    R <-->|Chat Completions 与 SSE| F["第一跳 · 31100<br/>shanghaitech-genai2api"]
+    F <-->|网页登录与聊天请求| W[学校 GenAI 网页后端]
+```
+
+## 与第一跳的区别
+
+| 服务 | 主要对接谁 | 负责什么 |
+| --- | --- | --- |
+| 第一跳 `shanghaitech-genai2api` | 学校网页后端 | 管理网页登录，处理附件，把工具定义写入网页提示，并解析模型输出 |
+| 第二跳 `genai2agent-relay` | agent 客户端和第一跳 | 将三种客户端协议转换为第一跳的 Chat 请求，保留工具 ID/历史结果，转发流式回复并校验工具批次 |
+
+- 学校账号只配置在第一跳；relay 用本地 `UPSTREAM_API_KEY` 访问它。
+- 客户端只配置 relay 地址和 `RELAY_API_KEY`，不需要知道学校网页请求格式。
+- 第一跳本身也提供三种兼容接口，合适的客户端可直接连 31100；双跳部署时统一连 relay 的 31110。
+
+两跳名称沿用项目约定，客户端请求先到第二跳。relay 不绕过第一跳访问学校，也不会因多加一层代理就让模型获得原生函数输入或本地文件权限。
 
 [启动](#快速开始) · [接入地址](#客户端接入) · [工作原理](#工具调用如何处理) · [详细配置](docs/CONFIGURATION.md)
 
@@ -117,11 +139,11 @@ curl -fsS http://127.0.0.1:31110/v1/models \
 
 | 项目 | 原版 | 当前 |
 | --- | --- | --- |
-| 上游 | `complete()` 等完整文本，拒绝原生调用 | 默认 `stream()`，接受结构化调用 |
+| 上游 | 等完整文本，拒绝上游原生调用 | 逐段接收回复，保留结构化调用 |
 | 下游 SSE | 完整文本校验后才输出 | 开始事件先发，正文/思考增量返回 |
 | 校验与恢复 | 已有 Schema 校验，文本纠错在 relay | 严格整批交付，native 请求恢复集中第一跳 |
 
-完整基线与兼容代价见[架构对照](https://github.com/FrozenYears/shanghaitech-genai2api/blob/feat/native-first-streaming/docs/STAGE_NATIVE_FIRST.md#5-与双跳原仓库及本地重构前分支的对照)。自定义 backend 需迁移到 `stream()`，详见[配置说明](docs/CONFIGURATION.md#自定义后端)。
+完整基线与兼容代价见[架构对照](https://github.com/FrozenYears/shanghaitech-genai2api/blob/feat/native-first-streaming/docs/STAGE_NATIVE_FIRST.md#5-与双跳原仓库及本地重构前分支的对照)。自定义 backend 的接口迁移见[配置说明](docs/CONFIGURATION.md#自定义后端)。
 
 ## 实测与文档
 
