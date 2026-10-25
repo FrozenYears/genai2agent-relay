@@ -27,7 +27,7 @@ flowchart LR
 [启动](#快速开始) · [接入地址](#客户端接入) · [工作原理](#工具调用如何处理) · [详细配置](docs/CONFIGURATION.md)
 
 > [!NOTE]
-> 使用 `feat/native-first-streaming` 分支，先按[第一跳 README](https://github.com/FrozenYears/shanghaitech-genai2api/blob/feat/native-first-streaming/README.md)启动 31100 服务。
+> 使用 `main` 分支，先按[第一跳 README](https://github.com/FrozenYears/shanghaitech-genai2api/blob/main/README.md)启动 31100 服务。
 > 学校网页登录、附件处理与工具适配均由第一跳负责。
 
 ## 快速开始
@@ -35,7 +35,7 @@ flowchart LR
 需 Git、uv 及 Python 3.10+；依赖仅安装到本仓库 `.venv`。
 
 ```bash
-git clone --branch feat/native-first-streaming https://github.com/FrozenYears/genai2agent-relay.git
+git clone --branch main https://github.com/FrozenYears/genai2agent-relay.git
 cd genai2agent-relay
 uv venv .venv
 ```
@@ -47,8 +47,7 @@ uv pip install --python .venv/bin/python -e .
 cp .env.example .env
 ```
 
-<details>
-<summary>Windows PowerShell 安装</summary>
+### Windows PowerShell 安装
 
 ```powershell
 uv pip install --python .venv/Scripts/python.exe -e .
@@ -56,8 +55,6 @@ Copy-Item .env.example .env
 ```
 
 WSL 与 Windows 环境独立，不共用 `.venv`；跨环境回环地址互通需自行确认。
-
-</details>
 
 编辑本仓库 `.env`：
 
@@ -120,7 +117,7 @@ curl -fsS http://127.0.0.1:31110/v1/models \
 3. 第一跳与 relay 校验完整批次，通过后按客户端协议交付。
 4. 本地 agent 执行工具并回传结果；relay 不执行命令、不读取参数指定文件。
 
-[网页模型的工具调用示例](https://github.com/FrozenYears/shanghaitech-genai2api/blob/feat/native-first-streaming/README.md#网页模型如何调用工具)
+[网页模型的工具调用示例](https://github.com/FrozenYears/shanghaitech-genai2api/blob/main/README.md#网页模型如何调用工具)
 
 | 模式 | 用途 | 生成重试 |
 | --- | --- | --- |
@@ -143,12 +140,12 @@ curl -fsS http://127.0.0.1:31110/v1/models \
 | 下游 SSE | 完整文本校验后才输出 | 开始事件先发，正文/思考增量返回 |
 | 校验与恢复 | 已有 Schema 校验，文本纠错在 relay | 严格整批交付，native 请求恢复集中第一跳 |
 
-完整基线与兼容代价见[架构对照](https://github.com/FrozenYears/shanghaitech-genai2api/blob/feat/native-first-streaming/docs/STAGE_NATIVE_FIRST.md#5-与双跳原仓库及本地重构前分支的对照)。自定义 backend 的接口迁移见[配置说明](docs/CONFIGURATION.md#自定义后端)。
+完整基线与兼容代价见[架构对照](https://github.com/FrozenYears/shanghaitech-genai2api/blob/main/docs/STAGE_NATIVE_FIRST.md#5-与双跳原仓库及本地重构前分支的对照)。自定义 backend 的接口迁移见[配置说明](docs/CONFIGURATION.md#自定义后端)。
 
 ## 实测与文档
 
 - 已记录的完整双跳 + omp 监督器测试中，DeepSeek、Kimi 均完成 20 阶段，最终 71 项验收通过；Kimi 用到 4 次自动反馈。
-- 这不是 relay 单独的成功率或任意任务保证。[实测报告](https://github.com/FrozenYears/shanghaitech-genai2api/blob/feat/native-first-streaming/docs/TEST_REPORT_deepseek_pro.md)
+- 这不是 relay 单独的成功率或任意任务保证。[实测报告](https://github.com/FrozenYears/shanghaitech-genai2api/blob/main/docs/TEST_REPORT_deepseek_pro.md)
 - [完整配置与限制](docs/CONFIGURATION.md) · [附件与思考透传](docs/genai2api-feature-passthrough.zh-CN.md) · [历史修复](docs/action-envelope-fixes.zh-CN.md)
 
 独立测试：在现有虚拟环境安装 pytest 后运行 `.venv/bin/python -m pytest tests -q`；Windows 替换解释器路径。部署检查不能只看单元测试。

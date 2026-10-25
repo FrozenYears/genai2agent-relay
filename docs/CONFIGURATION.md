@@ -13,7 +13,7 @@
 将独立仓库克隆至 Linux 文件系统：
 
 ```bash
-git clone --branch feat/native-first-streaming https://github.com/FrozenYears/genai2agent-relay.git
+git clone --branch main https://github.com/FrozenYears/genai2agent-relay.git
 cd genai2agent-relay
 uv venv .venv
 uv pip install --python .venv/bin/python -e .
@@ -30,7 +30,7 @@ cp .env.example .env
 ### Windows PowerShell
 
 ```powershell
-git clone --branch feat/native-first-streaming https://github.com/FrozenYears/genai2agent-relay.git
+git clone --branch main https://github.com/FrozenYears/genai2agent-relay.git
 Set-Location genai2agent-relay
 uv venv .venv
 uv pip install --python .venv\Scripts\python.exe -e .
@@ -156,9 +156,9 @@ MAX_ACTION_BYTES=1048576
 
 ### 可选的外部任务监督
 
-第一跳仓库提供可选 [OMP 监督器 `supervise.py`](https://github.com/FrozenYears/shanghaitech-genai2api/blob/feat/native-first-streaming/validation/native-first-endurance/supervise.py)。它在同一真实 OMP 会话中，每轮结束后运行操作者指定的独立验收，对失败或停滞反馈继续；默认额外 8 次反馈、整场 45 分钟，单次 RPC 等待 1200 秒。
+第一跳仓库提供可选 [OMP 监督器 `supervise.py`](https://github.com/FrozenYears/shanghaitech-genai2api/blob/main/validation/native-first-endurance/supervise.py)。它在同一真实 OMP 会话中，每轮结束后运行操作者指定的独立验收，对失败或停滞反馈继续；默认额外 8 次反馈、整场 45 分钟，单次 RPC 等待 1200 秒。
 
-监督器不会自动安装或接管所有客户端。整场预算耗尽、权限/身份故障或无法确认会话停稳时，会保存状态并以非零状态退出；没有跨进程自动恢复，也不是 OS 沙箱。它可以在限定预算内减少人工逐次反馈，不能保证无人值守无限成功。配置与使用条件见[第一跳 README](https://github.com/FrozenYears/shanghaitech-genai2api/blob/feat/native-first-streaming/README.md)。
+监督器不会自动安装或接管所有客户端。整场预算耗尽、权限/身份故障或无法确认会话停稳时，会保存状态并以非零状态退出；没有跨进程自动恢复，也不是 OS 沙箱。它可以在限定预算内减少人工逐次反馈，不能保证无人值守无限成功。配置与使用条件见[第一跳 README](https://github.com/FrozenYears/shanghaitech-genai2api/blob/main/README.md)。
 
 ## 兼容性与未支持特性
 

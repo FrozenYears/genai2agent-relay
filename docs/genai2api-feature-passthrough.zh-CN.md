@@ -4,7 +4,7 @@
 `shanghaitech-genai2api`（`f08f248`，端口 31100），本仓库 relay（端口 31101）。
 
 本文记录第二跳（relay）对上游新增能力的适配，以及用 Pi Agent 做的端到端验收。
-上游能力的实现与平台限制见上游仓库的 [README](https://github.com/FrozenYears/shanghaitech-genai2api/blob/feat/native-first-streaming/README.md)、[FEATURE_VALIDATION.md](https://github.com/FrozenYears/shanghaitech-genai2api/blob/feat/native-first-streaming/docs/FEATURE_VALIDATION.md) 与 [PI_REAL_WORLD_VALIDATION.md](https://github.com/FrozenYears/shanghaitech-genai2api/blob/feat/native-first-streaming/docs/PI_REAL_WORLD_VALIDATION.md)。
+上游能力的实现与平台限制见上游仓库的 [README](https://github.com/FrozenYears/shanghaitech-genai2api/blob/main/README.md)、[FEATURE_VALIDATION.md](https://github.com/FrozenYears/shanghaitech-genai2api/blob/main/docs/FEATURE_VALIDATION.md) 与 [PI_REAL_WORLD_VALIDATION.md](https://github.com/FrozenYears/shanghaitech-genai2api/blob/main/docs/PI_REAL_WORLD_VALIDATION.md)。
 
 > 本文是旧版本的实际验收记录，不代表本轮重构重新验证过所有附件组合。当前 relay 的 native 模式保留工具 ID 和可表达的 reasoning 历史元数据，正文与思考增量实时交付；这些变化及跨供应商签名限制见 README。
 
