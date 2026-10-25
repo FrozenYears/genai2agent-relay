@@ -18,8 +18,12 @@ and the website's text-based tool fallback. Its support for parsing Kimi/DeepSee
 native syntax does not prove that the website accepts native tool request fields.
 Upgrade both repositories together for the new default path.
 
-两跳端口、各层职责与重构前后差异见根项目的
-[原生优先阶段说明](../STAGE_NATIVE_FIRST.md)；阶段小验收不等同于正式服务长时实际工作验收。
+两跳端口、职责和流式生命周期见根项目的
+[原生优先架构说明](https://github.com/FrozenYears/shanghaitech-genai2api/blob/feat/native-first-streaming/STAGE_NATIVE_FIRST.md)。
+其中[第五节](https://github.com/FrozenYears/shanghaitech-genai2api/blob/feat/native-first-streaming/STAGE_NATIVE_FIRST.md#5-与双跳原仓库及本地重构前分支的对照)
+用冻结提交区分原作者 main、个人 fork main、本地重构前和当前 native-first：原版已有三协议及 Schema 校验，
+本次主要改变结构化工具传输、增量生命周期和恢复职责，不是首次提供工具 API。
+源码设计差异不等于原版/新版性能排名；“接近官方 API”也仅指已验证场景配合监督器的连续工作体验。
 
 Use `UPSTREAM_TOOL_MODE=text` only for an explicitly text-only backend. This mode
 encodes tool definitions and history in ordinary conversation text. Historical
