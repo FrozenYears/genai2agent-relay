@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import hmac
-import json
 import logging
 import time
 import uuid
@@ -12,10 +11,11 @@ from flask import Flask, Response, jsonify, request, stream_with_context
 from . import messages, responses
 from .actions import ActionTransportError
 from .config import RelayConfig
-from .engine import RelayResult, TextActionRelay, TextCompletionBackend, UpstreamReply
+from .engine import ActionRelay, RelayResult, TextCompletionBackend, UpstreamReply
 from .normalize import chat_tools, prepare_chat
 from .normalize import normalize_choice as chat_choice
 from .upstream import UpstreamClient, UpstreamError
+from .streaming import chat_call, chat_events, message_events, response_events
 
 logger = logging.getLogger(__name__)
 
@@ -42,70 +42,24 @@ def _usage(reply: UpstreamReply) -> dict[str, int]:
     return {"prompt_tokens": prompt, "completion_tokens": completion, "total_tokens": prompt + completion}
 
 
-def _chat_response(body: dict[str, Any], result: RelayResult, stream: bool):
-    decoded = result.action
-    reply = result.upstream
-    completion_id = "chatcmpl-" + uuid.uuid4().hex
-    created = int(time.time())
-    tool_calls = [
-        {
-            "id": "call_" + uuid.uuid4().hex[:24],
-            "type": "function",
-            "function": {
-                "name": call.name,
-                "arguments": json.dumps(call.parameters, ensure_ascii=False, separators=(",", ":")),
-            },
-        }
-        for call in decoded.calls
-    ]
-    finish_reason = "tool_calls" if tool_calls else "stop"
-    message: dict[str, Any] = {"role": "assistant", "content": decoded.text or None}
-    if reply.reasoning:
-        message["reasoning_content"] = reply.reasoning
-    if tool_calls:
-        message["tool_calls"] = tool_calls
-    usage = _usage(reply)
-    if not stream:
-        return jsonify({
-            "id": completion_id,
-            "object": "chat.completion",
-            "created": created,
-            "model": body.get("model") or "chatglm",
-            "choices": [{"index": 0, "message": message, "finish_reason": finish_reason}],
-            "usage": usage,
-        })
+def _chat_response(body: dict[str, Any], result: RelayResult):
+    calls = [chat_call(call) for call in result.action.calls]
+    message: dict[str, Any] = {"role": "assistant", "content": result.action.text or None}
+    if result.upstream.reasoning:
+        message["reasoning_content"] = result.upstream.reasoning
+    if calls:
+        message["tool_calls"] = calls
+    return jsonify({
+        "id": "chatcmpl-" + uuid.uuid4().hex, "object": "chat.completion",
+        "created": int(time.time()), "model": body.get("model") or "chatglm",
+        "choices": [{"index": 0, "message": message, "finish_reason": "tool_calls" if calls else "stop"}],
+        "usage": _usage(result.upstream),
+    })
 
-    def generate() -> Iterable[str]:
-        base = {
-            "id": completion_id,
-            "object": "chat.completion.chunk",
-            "created": created,
-            "model": body.get("model") or "chatglm",
-        }
-        yield "data: " + json.dumps({
-            **base,
-            "choices": [{"index": 0, "delta": {"role": "assistant"}, "finish_reason": None}],
-        }, ensure_ascii=False) + "\n\n"
-        delta: dict[str, Any] = {}
-        if decoded.text:
-            delta["content"] = decoded.text
-        if reply.reasoning:
-            delta["reasoning_content"] = reply.reasoning
-        if tool_calls:
-            delta["tool_calls"] = [dict(call, index=index) for index, call in enumerate(tool_calls)]
-        if delta:
-            yield "data: " + json.dumps({
-                **base,
-                "choices": [{"index": 0, "delta": delta, "finish_reason": None}],
-            }, ensure_ascii=False) + "\n\n"
-        yield "data: " + json.dumps({
-            **base,
-            "choices": [{"index": 0, "delta": {}, "finish_reason": finish_reason}],
-            "usage": usage,
-        }, ensure_ascii=False) + "\n\n"
-        yield "data: [DONE]\n\n"
 
-    return Response(stream_with_context(generate()), mimetype="text/event-stream")
+def _stream(events: Iterable[str]) -> Response:
+    return Response(stream_with_context(events), mimetype="text/event-stream",
+                    headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
 
 def create_app(
@@ -114,7 +68,7 @@ def create_app(
 ) -> Flask:
     config = config or RelayConfig.from_env()
     backend = upstream_client or UpstreamClient(config)
-    action_relay = TextActionRelay(backend, config.upstream_action_retries, config.max_action_bytes)
+    action_relay = ActionRelay(backend, config.upstream_action_retries, config.max_action_bytes, config.upstream_tool_mode)
     app = Flask(__name__)
     app.config["RELAY_CONFIG"] = config
 
@@ -154,9 +108,11 @@ def create_app(
             relay_request = prepare_chat(body, tools, choice)
         except (TypeError, ValueError) as exc:
             return _error(str(exc), 400)
+        if body.get("stream"):
+            return _stream(chat_events(body, action_relay, relay_request))
         try:
             result = action_relay.run(relay_request)
-            return _chat_response(body, result, bool(body.get("stream")))
+            return _chat_response(body, result)
         except (UpstreamError, ActionTransportError) as exc:
             logger.warning("Chat request failed model=%s error=%s", body.get("model"), type(exc).__name__)
             return _error(str(exc))
@@ -174,13 +130,13 @@ def create_app(
             relay_request = messages.prepare_messages(body, tools, choice)
         except (TypeError, ValueError) as exc:
             return _protocol_error(messages.error(str(exc), "invalid_request_error"), 400)
+        if body.get("stream"):
+            return _stream(message_events(body, action_relay, relay_request))
         try:
             result = action_relay.run(relay_request)
         except (UpstreamError, ActionTransportError) as exc:
             logger.warning("Messages request failed model=%s error=%s", body.get("model"), type(exc).__name__)
             return _protocol_error(messages.error(str(exc)), 502)
-        if body.get("stream"):
-            return Response(stream_with_context(messages.stream_events(body, result)), mimetype="text/event-stream")
         return jsonify(messages.build_response(body, result))
 
     @app.post("/v1/messages/count_tokens")
@@ -205,13 +161,13 @@ def create_app(
             relay_request = responses.prepare_responses(body, tools, choice)
         except (TypeError, ValueError) as exc:
             return _protocol_error(responses.error(str(exc)), 400)
+        if body.get("stream"):
+            return _stream(response_events(body, action_relay, relay_request))
         try:
             result = action_relay.run(relay_request)
         except (UpstreamError, ActionTransportError) as exc:
             logger.warning("Responses request failed model=%s error=%s", body.get("model"), type(exc).__name__)
             return _protocol_error(responses.error(str(exc), "server_error"), 502)
-        if body.get("stream"):
-            return Response(stream_with_context(responses.stream_events(body, result)), mimetype="text/event-stream")
         return jsonify(responses.build_response(body, result))
 
     @app.post("/v1/responses/input_tokens")
@@ -219,7 +175,11 @@ def create_app(
         body = request.get_json(silent=True) or {}
         if not isinstance(body, dict):
             return _protocol_error(responses.error("Request body must be a JSON object"), 400)
-        tools = responses.response_tools(body.get("tools"))
+        try:
+            tools = responses.response_tools(body.get("tools"))
+            responses.prepare_responses(body, tools, responses.normalize_choice(body.get("tool_choice")))
+        except (TypeError, ValueError) as exc:
+            return _protocol_error(responses.error(str(exc)), 400)
         return jsonify({"object": "response.input_tokens", "input_tokens": responses.estimate_tokens(body, tools)})
 
     return app

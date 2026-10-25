@@ -1,12 +1,16 @@
 from __future__ import annotations
 
 import json
+import math
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
+from uuid import uuid4
 
-from jsonschema import SchemaError, ValidationError, validate
+from jsonschema import SchemaError, ValidationError
 from jsonschema.validators import validator_for
+from referencing import Registry
+from referencing.exceptions import Unresolvable
 
 ACTION_OPEN = "@@ACTION@@"
 ACTION_CLOSE = "@@END_ACTION@@"
@@ -36,6 +40,8 @@ class ToolSpec:
     description: str
     parameters: dict[str, Any]
     kind: str = "function"
+    namespace: str | None = None
+    strict: bool | None = None
 
     def __post_init__(self) -> None:
         if not self.name:
@@ -49,6 +55,19 @@ class ToolSpec:
                 validator_for(self.parameters).check_schema(self.parameters)
             except SchemaError as exc:
                 raise ValueError(f"Invalid JSON Schema for tool {self.name!r}: {exc.message}") from exc
+            pending = [self.parameters]
+            while pending:
+                value = pending.pop()
+                if isinstance(value, dict):
+                    for key, child in value.items():
+                        if key in {"$ref", "$dynamicRef", "$recursiveRef"} and (
+                            not isinstance(child, str) or not child.startswith("#")
+                        ):
+                            raise ValueError("Tool schemas support only local # references; remote references are forbidden")
+                        if isinstance(child, (dict, list)):
+                            pending.append(child)
+                elif isinstance(value, list):
+                    pending.extend(child for child in value if isinstance(child, (dict, list)))
 
 
 @dataclass(frozen=True)
@@ -56,6 +75,8 @@ class ActionCall:
     name: str
     parameters: dict[str, Any]
     kind: str
+    id: str = field(default_factory=lambda: "call_" + uuid4().hex)
+    namespace: str | None = None
 
 
 @dataclass(frozen=True)
@@ -104,7 +125,8 @@ def render_action_prompt(tools: list[ToolSpec], choice: str | None = None) -> st
         "JSON parameter strings so decoding restores the original characters. Also preserve backslashes, quotes, "
         "newlines, Unicode, and full requested file content; never reinterpret, normalize, omit, or substitute it. "
         "Do not use remembered interfaces; these are the current request's authoritative tool definitions. "
-        "Each calls item must contain exactly operation and parameters, not name, arguments, function or id. "
+        "Each calls item must contain operation and parameters, and may include a non-empty unique string id. "
+        "Do not include name, arguments, function or other wrapper fields. "
         "Only independent operations may share one calls array. If a later operation depends on a result, "
         "request only the first operation and wait for the client result before continuing. "
         "Do not claim a file write/edit succeeded based on the call or a generic success status. "
@@ -139,13 +161,14 @@ _ACTION_OR_CODE = re.compile(
     r"^ {0,3}(?P<fence>`{3,}|~{3,})[^\n]*\n"
     r".*?^ {0,3}(?P=fence)[ \t]*(?:\n|$)"
     r"|(?<!`)(?P<ticks>`+)(?!`)[^\n]*?(?<!`)(?P=ticks)(?!`)"
+    r"|(?P<thinking><think>.*?(?:</think>|\Z))"
     r"|@@ACTION@@|@@ACTION@(?!@)|@@END_ACTION@@",
     re.MULTILINE | re.DOTALL,
 )
 
 
 def _first_action_start(text: str) -> int:
-    # 只跳过已闭合的代码引用；找到真实起点后不扫描参数，避免误伤参数中的 Markdown。
+    # 引用和思考不是执行通道；真实起点之后的参数不参与控制标记扫描。
     for match in _ACTION_OR_CODE.finditer(text):
         if match.group() == ACTION_OPEN:
             return match.start()
@@ -156,47 +179,33 @@ def _first_action_start(text: str) -> int:
     return -1
 
 
-_ALTERNATE_CALL_BLOCK = re.compile(
-    r"^ {0,3}(?P<fence>`{3,}|~{3,})(?:json)?[ \t]*\n"
-    r"(?P<code>.*?)(?:^ {0,3}(?P=fence)[ \t]*(?:\n|$)|\Z)"
-    r"|<parameter\s+name=[\"']calls[\"']\s*>(?P<xml>.*?)</parameter\s*>",
-    re.MULTILINE | re.DOTALL,
-)
+def _json_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    value: dict[str, Any] = {}
+    for key, item in pairs:
+        if key in value:
+            raise ValueError(f"Duplicate JSON key: {key!r}")
+        value[key] = item
+    return value
 
 
-def _reject_alternate_calls(text: str, tools: list[ToolSpec]) -> None:
-    names = {tool.name for tool in tools}
-    if not names:
-        return
-    for match in _ALTERNATE_CALL_BLOCK.finditer(text):
-        body = (match.group("code") or match.group("xml") or "").strip()
-        try:
-            value = json.loads(body)
-        except json.JSONDecodeError:
-            # 损坏 JSON 只匹配明确的首个调用前缀；不修复、不执行。
-            prefix = re.match(r'^\[\s*\{\s*"operation"\s*:\s*("(?:[^"\\]|\\.)*")\s*,\s*"parameters"\s*:\s*\{', body)
-            if not prefix:
-                continue
-            try:
-                name = json.loads(prefix.group(1))
-            except json.JSONDecodeError:
-                continue
-            calls = [{"operation": name, "parameters": {}}]
-        else:
-            calls = value.get("calls") if isinstance(value, dict) else value
-        if isinstance(calls, list) and calls and all(
-            isinstance(call, dict)
-            and isinstance(call.get("operation"), str)
-            and call["operation"] in names
-            and isinstance(call.get("parameters"), dict)
-            for call in calls
-        ):
-            raise ActionValidationError(
-                "Tool calls were emitted in a code block or XML instead of an action envelope",
-                'Calls in Markdown or <parameter name="calls"> were not executed. Please continue: '
-                'resend the complete calls in @@ACTION@@{"calls":[...]}@@END_ACTION@@, '
-                "without code fences or XML. Do not merely describe the operations.",
-            )
+def _reject_json_constant(value: str) -> Any:
+    raise ValueError(f"Non-finite JSON number: {value}")
+
+
+def _json_float(value: str) -> float:
+    number = float(value)
+    if not math.isfinite(number):
+        raise ValueError(f"Non-finite JSON number: {value}")
+    return number
+
+
+def strict_json_loads(value: str) -> Any:
+    return json.loads(
+        value,
+        object_pairs_hook=_json_object,
+        parse_constant=_reject_json_constant,
+        parse_float=_json_float,
+    )
 
 
 def decode_action(text: str, tools: list[ToolSpec], max_bytes: int) -> DecodedAction:
@@ -210,41 +219,31 @@ def decode_action(text: str, tools: list[ToolSpec], max_bytes: int) -> DecodedAc
     # 仅检查真实正文中的原生调用；引用与已闭合 JSON 参数里的标记是数据。
     prefix = stripped[:first_action] if first_action >= 0 else stripped
     syntax_text = _ACTION_OR_CODE.sub(
-        lambda match: "" if match.group("fence") or match.group("ticks") else match.group(),
+        lambda match: "" if match.group("fence") or match.group("ticks") or match.group("thinking") else match.group(),
         prefix,
     )
     if any(marker in syntax_text for marker in NATIVE_MARKERS):
         raise ActionTransportError("Native tool syntax cannot be delivered through this transport")
     if first_action < 0:
-        _reject_alternate_calls(stripped, tools)
         return DecodedAction(text=stripped, calls=())
     if not stripped.endswith(ACTION_CLOSE):
         raise ActionTransportError("Action envelope is incomplete or is not final")
 
-    body_end = len(stripped) - len(ACTION_CLOSE)
-    cursor = body_end
-    body = None
-    body_start = -1
-    json_error: json.JSONDecodeError | None = None
-    while True:
-        start = stripped.rfind(ACTION_OPEN, first_action, cursor)
-        if start < 0:
-            raise ActionTransportError("Action envelope contains malformed JSON") from json_error
-        try:
-            body = json.loads(stripped[start + len(ACTION_OPEN):body_end])
-            body_start = start
-            break
-        except json.JSONDecodeError as exc:
-            # 回溯到较早的封套起点，避免将参数内嵌标记的解析错误当作最终诊断。
-            json_error = exc
-            cursor = start
+    try:
+        body = strict_json_loads(stripped[first_action + len(ACTION_OPEN):-len(ACTION_CLOSE)])
+    except (ValueError, RecursionError) as exc:
+        raise ActionTransportError("Action envelope contains malformed JSON") from exc
 
     if not isinstance(body, dict) or set(body) != {"calls"}:
         raise ActionValidationError(
             "Action envelope must contain only a calls field",
             'Resend one object with exactly a calls field: {"calls":[{"operation":"...","parameters":{}}]}.',
         )
-    raw_calls = body["calls"]
+    calls = _validate_calls(body["calls"], tools)
+    return DecodedAction(text=stripped[:first_action].rstrip(), calls=calls)
+
+
+def _validate_calls(raw_calls: Any, tools: list[ToolSpec]) -> tuple[ActionCall, ...]:
     if not isinstance(raw_calls, list) or not raw_calls:
         raise ActionValidationError("Action calls must be a non-empty array", "The calls field must be a non-empty array of operation objects.")
 
@@ -255,17 +254,28 @@ def decode_action(text: str, tools: list[ToolSpec], max_bytes: int) -> DecodedAc
     failures: list[str] = []
     summary: list[str] = []
     failure_tool: ToolSpec | None = None
+    ids: set[str] = set()
     for index, raw_call in enumerate(raw_calls):
-        if not isinstance(raw_call, dict) or set(raw_call) != {"operation", "parameters"}:
+        if (
+            not isinstance(raw_call, dict)
+            or not {"operation", "parameters"} <= set(raw_call)
+            or set(raw_call) - {"operation", "parameters", "id"}
+        ):
             tool = by_name.get(raw_call.get("operation")) if isinstance(raw_call, dict) and isinstance(raw_call.get("operation"), str) else None
             failure_tool = failure_tool or tool
             summary.append("Each call must contain operation and parameters")
             failures.append(
-                f'calls[{index}] must be an object with exactly operation and parameters. '
+                f'calls[{index}] must be an object with operation, parameters and optionally id. '
                 'Use {"operation":"AllowedOperationName","parameters":{}}; '
-                "do not use name, arguments, function, id or extra wrapper fields. Resend the complete envelope."
+                "do not use name, arguments, function or extra wrapper fields. Resend the complete envelope."
             )
             continue
+        call_id = raw_call.get("id") if "id" in raw_call else "call_" + uuid4().hex
+        if not isinstance(call_id, str) or not call_id.strip() or call_id in ids:
+            summary.append("Call IDs must be non-empty unique strings")
+            failures.append(f"calls[{index}].id must be a non-empty unique string. Resend the complete envelope.")
+            continue
+        ids.add(call_id)
         name = raw_call["operation"]
         parameters = raw_call["parameters"]
         if not isinstance(name, str) or name not in by_name:
@@ -284,7 +294,13 @@ def decode_action(text: str, tools: list[ToolSpec], max_bytes: int) -> DecodedAc
             continue
         tool = by_name[name]
         try:
-            validate(instance=parameters, schema=_transport_schema(tool))
+            schema = _transport_schema(tool)
+            validator_for(schema)(schema, registry=Registry()).validate(parameters)
+        except (SchemaError, Unresolvable) as exc:
+            failure_tool = failure_tool or tool
+            summary.append(f"Invalid or unresolvable schema for {name}: {exc}")
+            failures.append(f"calls[{index}] cannot be validated against the supplied local schema.")
+            continue
         except ValidationError as exc:
             path = ".".join(str(part) for part in exc.absolute_path) or "parameters"
             missing = [key for key in _transport_schema(tool).get("required", []) if key not in parameters]
@@ -298,9 +314,95 @@ def decode_action(text: str, tools: list[ToolSpec], max_bytes: int) -> DecodedAc
                 + "Use the supplied current schema, not a remembered interface. Resend the complete envelope."
             )
             continue
-        calls.append(ActionCall(name=name, parameters=parameters, kind=tool.kind))
+        calls.append(ActionCall(name=name, parameters=parameters, kind=tool.kind, id=call_id, namespace=tool.namespace))
 
     if failures:
         raise ActionValidationError("; ".join(summary), " ".join(failures), failure_tool)
 
-    return DecodedAction(text=stripped[:body_start].rstrip(), calls=tuple(calls))
+    return tuple(calls)
+
+
+def validate_choice(
+    decoded: DecodedAction,
+    choice: str | None,
+    parallel_tool_calls: bool = True,
+) -> DecodedAction:
+    if choice == "none" and decoded.calls:
+        raise ActionValidationError(
+            "Tool calls are forbidden by tool_choice",
+            "Return a plain-text answer without any tool calls.",
+        )
+    if choice not in {None, "auto", "none"}:
+        if not decoded.calls:
+            raise ActionValidationError(
+                "Tool choice requires a tool call",
+                "Return a complete call using the required tool choice.",
+            )
+        if choice != "required" and any(call.name != choice for call in decoded.calls):
+            raise ActionValidationError(
+                f"Tool choice requires only {choice!r}",
+                f"Use only the operation named {json.dumps(choice)} and resend the complete batch.",
+            )
+    if not parallel_tool_calls and len(decoded.calls) > 1:
+        raise ActionValidationError(
+            "Parallel tool calls are disabled",
+            "Return exactly one tool call and wait for its result before continuing.",
+        )
+    return decoded
+
+
+def validate_native_calls(
+    raw_calls: Any,
+    tools: list[ToolSpec],
+    choice: str | None = "auto",
+    parallel_tool_calls: bool = True,
+) -> tuple[ActionCall, ...]:
+    if not isinstance(raw_calls, list):
+        raise ActionValidationError(
+            "Native tool calls must be an array",
+            "Return tool_calls as an array of complete native calls.",
+        )
+    by_name = {tool.name: tool for tool in tools}
+    normalized: list[dict[str, Any]] = []
+    failures: list[str] = []
+    for index, raw_call in enumerate(raw_calls):
+        if not isinstance(raw_call, dict):
+            failures.append(f"tool_calls[{index}] must be an object.")
+            continue
+        kind = raw_call.get("type")
+        if not isinstance(kind, str) or kind not in {"function", "custom"}:
+            failures.append(f"tool_calls[{index}].type must be function or custom.")
+            continue
+        if set(raw_call) != {"id", "type", kind}:
+            failures.append(f"tool_calls[{index}] must contain exactly id, type and {kind}.")
+            continue
+        payload = raw_call[kind]
+        fields = {"name", "arguments"} if kind == "function" else {"name", "input"}
+        if not isinstance(payload, dict) or set(payload) != fields:
+            failures.append(f"tool_calls[{index}].{kind} must contain exactly {', '.join(sorted(fields))}.")
+            continue
+        name = payload["name"]
+        tool = by_name.get(name) if isinstance(name, str) else None
+        if tool is None:
+            failures.append(f"tool_calls[{index}] names an unknown tool: {name!r}.")
+            continue
+        if kind == "custom":
+            if tool.kind != "custom" or not isinstance(payload["input"], str):
+                failures.append(f"tool_calls[{index}] requires a custom tool and a string input.")
+                continue
+            parameters = {"input": payload["input"]}
+        else:
+            if not isinstance(payload["arguments"], str):
+                failures.append(f"tool_calls[{index}].function.arguments must be a JSON string.")
+                continue
+            try:
+                parameters = strict_json_loads(payload["arguments"])
+            except (ValueError, RecursionError):
+                failures.append(f"tool_calls[{index}].function.arguments must be strict JSON.")
+                continue
+        # 原生 custom 与 function 包装的 custom 共用同一 Schema，整批验证后才交付。
+        normalized.append({"operation": name, "parameters": parameters, "id": raw_call["id"]})
+    if failures:
+        raise ActionValidationError("; ".join(failures), " ".join(failures))
+    calls = _validate_calls(normalized, tools) if normalized else ()
+    return validate_choice(DecodedAction(text="", calls=calls), choice, parallel_tool_calls).calls

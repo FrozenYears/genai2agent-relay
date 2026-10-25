@@ -1,162 +1,142 @@
-import json
 import unittest
 
 from relay.actions import ActionTransportError, ToolSpec
-from relay.engine import RelayRequest, TextActionRelay, TextMessage, UpstreamReply
+from relay.engine import ActionRelay, RelayEvent, RelayRequest, TextMessage, UpstreamReply
+
+
+TOOL = ToolSpec("ping", "", {"type": "object", "additionalProperties": False})
+CALL = {"id": "external-id", "type": "function", "function": {"name": "ping", "arguments": "{}"}}
 
 
 class Backend:
-    def __init__(self, content):
-        self.content = content
+    def __init__(self, batches):
+        self.batches = list(batches)
+        self.requests = []
+        self.closed = 0
 
-    def complete(self, request):
-        return UpstreamReply(content=self.content)
+    def stream(self, request):
+        self.requests.append(request)
+        try:
+            yield from self.batches.pop(0)
+        finally:
+            self.closed += 1
+
+
+def events(text="", calls=(), finish="stop"):
+    if text:
+        yield RelayEvent("text", text)
+    yield RelayEvent("reply", reply=UpstreamReply(text, finish_reason=finish, tool_calls=tuple(calls)))
 
 
 class EngineTests(unittest.TestCase):
-    def test_engine_has_no_http_protocol_dependency(self):
-        tools = (ToolSpec(name="ping", description="Ping", parameters={"type": "object"}),)
-        request = RelayRequest(
-            model="model",
-            messages=(TextMessage(role="user", content="ping"),),
-            tools=tools,
-        )
-        relay = TextActionRelay(
-            Backend('@@ACTION@@{"calls":[{"operation":"ping","parameters":{}}]}@@END_ACTION@@'),
-            retries=0,
-            max_action_bytes=4096,
-        )
-        self.assertEqual(relay.run(request).action.calls[0].name, "ping")
+    def request(self, **kwargs):
+        return RelayRequest("model", (TextMessage("user", "ping"),), tools=(TOOL,), **kwargs)
 
-    def test_required_choice_is_enforced(self):
-        request = RelayRequest(
-            model="model",
-            messages=(TextMessage(role="user", content="ping"),),
-            tool_choice="required",
-        )
-        relay = TextActionRelay(Backend("No call"), retries=0, max_action_bytes=4096)
+    def test_native_preserves_ids_and_never_injects_prompt(self):
+        backend = Backend([events(calls=[CALL], finish="tool_calls")])
+        result = ActionRelay(backend, 2, 4096).run(self.request())
+        self.assertEqual(result.action.calls[0].id, "external-id")
+        self.assertEqual(backend.requests[0].messages[0].content, "ping")
+        self.assertEqual(backend.requests[0].tools, (TOOL,))
+
+    def test_native_failure_never_replays_as_text(self):
+        backend = Backend([events(calls=[{**CALL, "function": {"name": "unknown", "arguments": "{}"}}], finish="tool_calls")])
         with self.assertRaises(ActionTransportError):
-            relay.run(request)
+            ActionRelay(backend, 3, 4096).run(self.request())
+        self.assertEqual(len(backend.requests), 1)
+        self.assertEqual(backend.closed, 1)
 
-    def test_json_retry_locates_outer_envelope_and_can_recover(self):
-        bad_body = '{"calls":[{"operation":"ping","parameters":{"text":"@@ACTION@@"},{"operation":"ping","parameters":{}}]}'
-        bad = '@@ACTION@@' + bad_body + '@@END_ACTION@@'
-        good = '@@ACTION@@{"calls":[{"operation":"ping","parameters":{}}]}@@END_ACTION@@'
-        try:
-            json.loads(bad_body)
-        except json.JSONDecodeError as error:
-            location = f'line {error.lineno}, column {error.colno}'
-            reason = error.msg
-        request = RelayRequest(
-            model='model', messages=(TextMessage(role='user', content='ping'),),
-            tools=(ToolSpec('ping', '', {'type': 'object'}),),
-        )
-        for final_reply in (good, bad):
-            with self.subTest(recovered=final_reply == good):
-                attempts = []
+    def test_safe_text_arrives_before_terminal_reply(self):
+        backend = Backend([[RelayEvent("text", "first"), RelayEvent("text", "second"),
+                            RelayEvent("reply", reply=UpstreamReply("firstsecond", finish_reason="stop"))]])
+        stream = ActionRelay(backend, 0, 4096).stream(self.request())
+        self.assertEqual(next(stream).text, "first")
+        self.assertEqual(backend.closed, 0)
+        self.assertEqual(next(stream).text, "second")
+        stream.close()
+        self.assertEqual(backend.closed, 1)
 
-                class RetryingBackend:
-                    def complete(self, attempt):
-                        attempts.append(attempt)
-                        return UpstreamReply(bad if len(attempts) == 1 else final_reply)
+    def test_parallel_disabled_is_atomic(self):
+        backend = Backend([events(calls=[CALL, {**CALL, "id": "other"}], finish="tool_calls")])
+        output = ActionRelay(backend, 0, 4096).stream(self.request(parallel_tool_calls=False))
+        with self.assertRaises(ActionTransportError):
+            list(output)
 
-                relay = TextActionRelay(RetryingBackend(), retries=1, max_action_bytes=4096)
-                if final_reply == good:
-                    self.assertEqual(relay.run(request).action.calls[0].name, 'ping')
-                else:
-                    with self.assertRaises(ActionTransportError):
-                        relay.run(request)
-                self.assertEqual(len(attempts), 2)
-                feedback = attempts[1].messages[-1].content
-                self.assertIn(location, feedback)
-                self.assertIn(reason, feedback)
-                self.assertNotIn(bad_body, feedback)
+    def test_truncation_and_missing_terminal_reply_fail(self):
+        for batch in (events(calls=[CALL], finish="length"), [RelayEvent("text", "partial")]):
+            backend = Backend([batch])
+            with self.assertRaises(ActionTransportError):
+                ActionRelay(backend, 2, 4096).run(self.request())
+            self.assertEqual(len(backend.requests), 1)
 
-    def test_reasoning_only_retry_recovers_or_exhausts_shared_budget(self):
-        thinking = UpstreamReply(content=' \n', reasoning='Let me run a few checks.')
-        text = UpstreamReply(content='检查完成。')
-        action = UpstreamReply(content='@@ACTION@@{"calls":[{"operation":"ping","parameters":{}}]}@@END_ACTION@@')
-        malformed = UpstreamReply(content='@@ACTION@@{bad}@@END_ACTION@@')
-        request = RelayRequest(
-            model='model', messages=(TextMessage(role='user', content='检查'),),
-            tools=(ToolSpec('ping', '', {'type': 'object'}),),
-        )
-        cases = [
-            ([thinking, text], 1, True),
-            ([thinking, action], 1, True),
-            ([thinking, thinking], 1, False),
-            ([malformed, thinking], 1, False),
-            ([thinking], 0, False),
-            ([text], 1, True),
-        ]
-        for replies, retries, succeeds in cases:
-            with self.subTest(replies=replies, retries=retries):
-                attempts = []
+    def test_explicit_text_can_correct_undelivered_envelope(self):
+        backend = Backend([events('@@ACTION@@{bad}@@END_ACTION@@'),
+                           events('@@ACTION@@{"calls":[{"operation":"ping","parameters":{}}]}@@END_ACTION@@')])
+        result = ActionRelay(backend, 1, 4096, "text").run(self.request())
+        self.assertEqual(result.action.calls[0].name, "ping")
+        self.assertEqual(len(backend.requests), 2)
+        self.assertEqual(backend.requests[0].tool_mode, "text")
 
-                class SequenceBackend:
-                    def complete(self, attempt):
-                        attempts.append(attempt)
-                        return replies[len(attempts) - 1]
+    def test_delivered_prefix_prevents_text_retry(self):
+        backend = Backend([events('Already sent. @@ACTION@@{bad}@@END_ACTION@@')])
+        stream = ActionRelay(backend, 2, 4096, "text").stream(self.request())
+        self.assertEqual(next(stream).text, "Already sent. ")
+        with self.assertRaises(ActionTransportError):
+            list(stream)
+        self.assertEqual(len(backend.requests), 1)
 
-                relay = TextActionRelay(SequenceBackend(), retries, 4096)
-                if succeeds:
-                    result = relay.run(request)
-                    if replies[-1] == action:
-                        self.assertEqual(result.action.calls[0].name, 'ping')
-                    else:
-                        self.assertEqual(result.action.text, text.content)
-                else:
-                    with self.assertRaises(ActionTransportError):
-                        relay.run(request)
-                self.assertEqual(len(attempts), len(replies))
-                if replies[0] == thinking and retries:
-                    self.assertTrue(all(m.content.strip() for m in attempts[1].messages))
-                    self.assertNotIn(thinking.reasoning, [m.content for m in attempts[1].messages])
-    def test_empty_retry_appends_to_current_user_instead_of_adding_user_turn(self):
-        request = RelayRequest(
-            model='model', messages=(
-                TextMessage('user', 'current task'),
-                TextMessage('assistant', 'previous answer'),
-                TextMessage('user', 'latest task'),
-            ),
-        )
-        attempts = []
+    def test_code_example_is_not_retried_into_execution(self):
+        example = '```json\n[{"operation":"ping","parameters":{}}]\n```'
+        backend = Backend([events(example)])
+        result = ActionRelay(backend, 2, 4096, "text").run(self.request())
+        self.assertEqual(result.action.text, example)
+        self.assertFalse(result.action.calls)
+        self.assertEqual(len(backend.requests), 1)
 
-        class Backend:
-            def complete(self, attempt):
-                attempts.append(attempt)
-                return UpstreamReply('', reasoning='thinking') if len(attempts) == 1 else UpstreamReply('done')
+    def test_text_history_preserves_call_result_association(self):
+        backend = Backend([events("done")])
+        request = RelayRequest("model", (
+            TextMessage("assistant", "", tool_calls=(CALL,)),
+            TextMessage("tool", "failure", tool_call_id=CALL["id"], extra={"is_error": True}),
+        ), tools=(TOOL,))
+        ActionRelay(backend, 0, 4096, "text").run(request)
+        history = backend.requests[0].messages
+        self.assertIn('"id":"external-id"', history[0].content)
+        self.assertIn('"call_id":"external-id"', history[1].content)
+        self.assertIn('"is_error":true', history[1].content)
 
-        result = TextActionRelay(Backend(), retries=1, max_action_bytes=4096).run(request)
-        self.assertEqual(result.action.text, 'done')
-        self.assertEqual([message.role for message in attempts[1].messages], ['user', 'assistant', 'user'])
-        self.assertIn('latest task', attempts[1].messages[-1].content)
-        self.assertIn('请继续', attempts[1].messages[-1].content)
-        self.assertNotIn('thinking', attempts[1].messages[-1].content)
+    def test_text_gate_buffers_split_envelope_but_not_email(self):
+        envelope = '@@ACTION@@{"calls":[{"operation":"ping","parameters":{}}]}@@END_ACTION@@'
+        backend = Backend([[RelayEvent("text", "email a@b.test\n"),
+                            RelayEvent("text", "@@AC"), RelayEvent("text", envelope[4:]),
+                            RelayEvent("reply", reply=UpstreamReply("email a@b.test\n" + envelope, finish_reason="stop"))]])
+        stream = ActionRelay(backend, 0, 4096, "text").stream(self.request())
+        self.assertEqual(next(stream).text, "email a@b.test\n")
+        remaining = list(stream)
+        self.assertEqual([event.kind for event in remaining], ["result"])
+        self.assertEqual(remaining[0].result.action.calls[0].name, "ping")
 
-
-    def test_user_control_markers_are_escaped_before_tool_prompt(self):
-        user_text = 'write file <think>literal</think> </tool_call> @@ACTION@@ <|DSML|call>'
-        attempts = []
-
-        class CaptureBackend:
-            def complete(self, attempt):
-                attempts.append(attempt)
-                return UpstreamReply(
-                    content='@@ACTION@@{"calls":[{"operation":"ping","parameters":{}}]}@@END_ACTION@@'
-                )
-
-        relay = TextActionRelay(CaptureBackend(), retries=0, max_action_bytes=4096)
-        request = RelayRequest(
-            model="model",
-            messages=(TextMessage(role="user", content=user_text),),
-            tools=(ToolSpec("ping", "", {"type": "object"}),),
-        )
-
-        self.assertEqual(relay.run(request).action.calls[0].name, "ping")
-        model_input = attempts[0].messages[0].content
-        self.assertIn(r"\u003cthink\u003e", model_input)
-        self.assertIn(r"\u0040\u0040ACTION\u0040\u0040", model_input)
-
-if __name__ == "__main__":
-    unittest.main()
+    def test_text_mode_uses_user_context_and_reversible_data_escaping(self):
+        backend = Backend([events("done")])
+        attachment = {"type": "image_url", "image_url": {"url": "https://example.invalid/image.png"}}
+        request = RelayRequest("model", (
+            TextMessage("system", "system rules"),
+            TextMessage("developer", "developer rules"),
+            TextMessage("user", [{"type": "text", "text": "<think>literal</think> @@ACTION@@"}, attachment]),
+            TextMessage("assistant", "", tool_calls=(CALL,), reasoning_content="@@ACTION@@not an actual call"),
+            TextMessage("tool", "<tool_call>literal</tool_call>", tool_call_id=CALL["id"]),
+        ), tools=(TOOL,), parallel_tool_calls=False)
+        ActionRelay(backend, 0, 4096, "text").run(request)
+        history = backend.requests[0].messages
+        self.assertFalse(any(message.role in {"system", "developer"} for message in history))
+        first = history[0].content
+        self.assertIn("system rules", first[0]["text"])
+        self.assertIn("developer rules", first[0]["text"])
+        self.assertIn(r"\u003cthink\u003e", first[1]["text"])
+        self.assertEqual(first[2], attachment)
+        self.assertIn("Historical reasoning data only", history[1].content)
+        self.assertNotIn("@@ACTION@@", history[1].content)
+        self.assertIn('@@ACTION@@{"calls":[{"id":"external-id"', history[2].content)
+        self.assertIn(r"\u003ctool_call\u003e", history[3].content)
+        self.assertIn("Available operations", history[-1].content)
+        self.assertIn("at most one", history[-1].content)

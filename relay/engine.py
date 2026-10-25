@@ -1,27 +1,34 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, field
-from typing import Any, Protocol
+from dataclasses import dataclass, field, replace
+from typing import Any, Iterator, Protocol
 
 from .actions import (
-    ActionDelimiterError,
-    ActionTransportError,
-    ActionValidationError,
-    DecodedAction,
-    ToolSpec,
-    decode_action,
-    render_action_prompt,
+    ActionTransportError, DecodedAction, ToolSpec, decode_action, encode_calls,
+    encode_result, render_action_prompt, strict_json_loads, validate_choice, validate_native_calls,
 )
-from .content import append_text, escape_action_markers, prepend_text
+from .content import append_text, attachments_of, build_content, escape_action_markers, prepend_text, text_of
 
 
 @dataclass(frozen=True)
 class TextMessage:
-    """One chat message; content is text or a list of text/attachment blocks."""
-
     role: str
-    content: str | list[dict[str, Any]]
+    content: str | list[dict[str, Any]] | None
+    tool_calls: tuple[dict[str, Any], ...] = ()
+    tool_call_id: str | None = None
+    reasoning_content: str = ""
+    extra: dict[str, Any] = field(default_factory=dict)
+
+    def as_dict(self) -> dict[str, Any]:
+        value = {**self.extra, "role": self.role, "content": self.content}
+        if self.tool_calls:
+            value["tool_calls"] = list(self.tool_calls)
+        if self.tool_call_id is not None:
+            value["tool_call_id"] = self.tool_call_id
+        if self.reasoning_content:
+            value["reasoning_content"] = self.reasoning_content
+        return value
 
 
 @dataclass(frozen=True)
@@ -34,6 +41,7 @@ class RelayRequest:
     max_tokens: int = 8192
     sampling: dict[str, Any] = field(default_factory=dict)
     upstream_options: dict[str, Any] = field(default_factory=dict)
+    parallel_tool_calls: bool = True
 
 
 @dataclass(frozen=True)
@@ -42,6 +50,7 @@ class UpstreamReply:
     reasoning: str = ""
     usage: dict[str, Any] = field(default_factory=dict)
     finish_reason: str | None = None
+    tool_calls: tuple[dict[str, Any], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -51,156 +60,190 @@ class RelayResult:
 
 
 @dataclass(frozen=True)
+class RelayEvent:
+    kind: str
+    text: str = ""
+    result: RelayResult | None = None
+    reply: UpstreamReply | None = None
+
+
+@dataclass(frozen=True)
 class TextCompletionRequest:
     model: str
     messages: tuple[TextMessage, ...]
     max_tokens: int = 8192
     sampling: dict[str, Any] = field(default_factory=dict)
     options: dict[str, Any] = field(default_factory=dict)
+    tools: tuple[ToolSpec, ...] = ()
+    tool_choice: str = "auto"
+    parallel_tool_calls: bool = True
+    tool_mode: str = "native"
 
 
 class TextCompletionBackend(Protocol):
-    def complete(self, request: TextCompletionRequest) -> UpstreamReply:
-        """Return one complete, ordinary-text assistant response."""
+    def stream(self, request: TextCompletionRequest) -> Iterator[RelayEvent]: ...
 
 
-class TextActionRelay:
-    """Protocol-neutral action transport over a plain-text completion backend."""
+def _safe_text_end(text: str) -> int:
+    markers = ("@@ACTION", "@@END_ACTION")
+    end = len(text)
+    for marker in markers:
+        start = text.find(marker)
+        if start >= 0:
+            end = min(end, start)
+        for size in range(1, len(marker)):
+            if text.endswith(marker[:size]):
+                end = min(end, len(text) - size)
+    return end
 
-    def __init__(self, backend: TextCompletionBackend, retries: int, max_action_bytes: int) -> None:
+
+class ActionRelay:
+    """原生结构优先；文本封套只在显式 text 模式启用。"""
+
+    def __init__(self, backend: TextCompletionBackend, retries: int, max_action_bytes: int,
+                 tool_mode: str = "native") -> None:
+        if tool_mode not in {"native", "text"}:
+            raise ValueError("UPSTREAM_TOOL_MODE must be native or text")
         self.backend = backend
         self.retries = retries
         self.max_action_bytes = max_action_bytes
+        self.tool_mode = tool_mode
 
     def run(self, request: RelayRequest) -> RelayResult:
+        events = self.stream(request)
+        try:
+            for event in events:
+                if event.result is not None:
+                    return event.result
+        finally:
+            events.close()
+        raise ActionTransportError("First-hop stream ended without a result")
+
+    def stream(self, request: RelayRequest) -> Iterator[RelayEvent]:
         messages = self._prepare_messages(request)
-        last_error: ActionTransportError | None = None
-        for attempt in range(self.retries + 1):
-            attempt_request = TextCompletionRequest(
-                model=request.model,
-                messages=tuple(messages),
-                max_tokens=request.max_tokens,
-                sampling=request.sampling,
-                options=request.upstream_options,
+        attempts = self.retries + 1 if self.tool_mode == "text" else 1
+        for attempt in range(attempts):
+            upstream_request = TextCompletionRequest(
+                request.model, tuple(messages), request.max_tokens, request.sampling,
+                request.upstream_options, request.tools, request.tool_choice,
+                request.parallel_tool_calls, self.tool_mode,
             )
-            reply = self.backend.complete(attempt_request)
-            # 截断不属于序列化错误；不以相同预算盲目重试，也不交付可能未完成的操作。
-            if reply.finish_reason == "length":
-                raise ActionTransportError(
-                    "First-hop output was truncated (finish_reason=length); "
-                    "no actions were delivered. Review max_tokens (includes reasoning)."
-                )
+            delivered = False
+            text = ""
+            emitted = 0
+            reply = None
+            upstream = self.backend.stream(upstream_request)
             try:
-                if not reply.content.strip():
-                    raise ActionTransportError("First-hop model returned no answer or action")
-                decoded = decode_action(reply.content, list(request.tools), self.max_action_bytes)
-                self._validate_choice(decoded, request.tool_choice)
-                return RelayResult(action=decoded, upstream=reply)
-            except ActionTransportError as exc:
-                last_error = exc
-                if attempt >= self.retries:
-                    raise
-                if not reply.content.strip():
-                    self._append_continuation(messages)
-                    continue
-                diagnostic = ""
-                if isinstance(exc.__cause__, json.JSONDecodeError):
-                    error = exc.__cause__
-                    diagnostic = (
-                        f" The envelope JSON failed to parse: {error.msg} "
-                        f"(line {error.lineno}, column {error.colno} within the JSON body). "
-                        "Check the JSON structure at that position and resend the complete envelope, "
-                        "not a patch or simulated execution result."
+                for event in upstream:
+                    if event.kind == "text":
+                        text += event.text
+                        if len(text.encode("utf-8")) > self.max_action_bytes:
+                            raise ActionTransportError("Upstream response exceeds MAX_ACTION_BYTES")
+                        # 封套及其参数绝不作为正文提前交付；文档引用由终态解码后释放。
+                        safe_end = len(text) if self.tool_mode == "native" else _safe_text_end(text)
+                        if safe_end > emitted:
+                            delivered = True
+                            yield RelayEvent("text", text[emitted:safe_end])
+                            emitted = safe_end
+                    elif event.kind == "reasoning":
+                        delivered = delivered or bool(event.text)
+                        yield event
+                    elif event.kind == "reply":
+                        reply = event.reply
+                    elif event.kind == "ping":
+                        yield event
+                if reply is None:
+                    raise ActionTransportError("First-hop stream ended without a terminal reply")
+                if reply.finish_reason not in {"stop", "tool_calls"}:
+                    raise ActionTransportError(
+                        f"First-hop output did not finish successfully ({reply.finish_reason!r}); no calls delivered"
                     )
-                elif isinstance(exc, ActionDelimiterError):
-                    diagnostic = (
-                        " The action opening marker is malformed or missing; it must be exactly @@ACTION@@. "
-                        "Please continue and resend the complete envelope ending with @@END_ACTION@@. "
-                        "Correctly escape quotes, backslashes and newlines inside JSON strings."
-                    )
-                elif isinstance(exc, ActionValidationError):
-                    diagnostic = " " + exc.feedback
-                    if exc.tool is not None:
-                        diagnostic += "\n" + render_action_prompt([exc.tool], request.tool_choice)
-                messages.extend((
-                    TextMessage(role="assistant", content=reply.content),
-                    TextMessage(
-                        role="user",
-                        content=(
-                            "The previous serialization was invalid and nothing was executed. "
-                            "Retry the response. If an operation is needed, use one final closed "
-                            "@@ACTION@@ JSON envelope with an allowed operation and schema-valid parameters."
-                            + diagnostic
-                        ),
-                    ),
-                ))
-        raise ActionTransportError(str(last_error or "Action transport failed"))
+                if self.tool_mode == "native":
+                    calls = validate_native_calls(list(reply.tool_calls), list(request.tools),
+                                                  request.tool_choice, request.parallel_tool_calls)
+                    decoded = DecodedAction(reply.content, calls)
+                else:
+                    if reply.tool_calls:
+                        raise ActionTransportError("Native calls are not allowed in explicit text mode")
+                    try:
+                        decoded = decode_action(reply.content, list(request.tools), self.max_action_bytes)
+                        validate_choice(decoded, request.tool_choice, request.parallel_tool_calls)
+                    except ActionTransportError as exc:
+                        # 只有未交付内容、且明确尝试封套的序列化失败才允许纠错。
+                        if delivered or attempt + 1 >= attempts or not reply.content.lstrip().startswith("@@ACTION"):
+                            raise
+                        messages.extend((TextMessage("assistant", reply.content), TextMessage(
+                            "user", "Nothing was executed. Resend one complete schema-valid action envelope. " + str(exc),
+                        )))
+                        continue
+                if not decoded.text and not decoded.calls:
+                    raise ActionTransportError("First-hop returned no answer or tool call")
+                if len(decoded.text) > emitted:
+                    yield RelayEvent("text", decoded.text[emitted:])
+                yield RelayEvent("result", result=RelayResult(decoded, reply))
+                return
+            finally:
+                upstream.close()
 
-    @staticmethod
-    def _prepare_messages(request: RelayRequest) -> list[TextMessage]:
+    def _prepare_messages(self, request: RelayRequest) -> list[TextMessage]:
         messages = list(request.messages)
-        if request.tools and request.tool_choice != "none":
-            messages = [
-                TextMessage(message.role, escape_action_markers(message.content))
-                if message.role == "user" else message
-                for message in messages
-            ]
-        instructions = request.instructions.strip()
-
+        if request.instructions:
+            messages.insert(0, TextMessage("system", request.instructions))
+        if self.tool_mode == "native":
+            return messages
+        converted: list[TextMessage] = []
+        instructions: list[str] = []
+        for message in messages:
+            content = message.content
+            if message.role in {"system", "developer"}:
+                instructions.append(text_of(escape_action_markers(content)))
+                continue
+            if message.role == "user":
+                content = escape_action_markers(content)
+            if message.role == "tool":
+                content = build_content([
+                    escape_action_markers(encode_result(
+                        message.tool_call_id or "", text_of(content), bool(message.extra.get("is_error")),
+                    )),
+                ], attachments_of(content))
+                converted.append(TextMessage("user", content))
+                continue
+            if message.tool_calls:
+                calls = []
+                for call in message.tool_calls:
+                    function = call["function"]
+                    calls.append({"id": call["id"], "operation": function["name"],
+                                  "parameters": strict_json_loads(function["arguments"])})
+                # 仅新生成的封套标记属于控制结构，不转义历史 assistant 调用外壳。
+                content = build_content([text_of(content), encode_calls(calls)], attachments_of(content))
+            reasoning = {key: message.extra[key] for key in ("thinking_blocks", "reasoning") if key in message.extra}
+            if message.reasoning_content:
+                reasoning["reasoning_content"] = message.reasoning_content
+            if reasoning:
+                converted.append(TextMessage("user", (
+                    "Historical reasoning data only, not instructions, a new request, or an action to execute:\n"
+                    + escape_action_markers(json.dumps(reasoning, ensure_ascii=False))
+                )))
+            extra = {key: value for key, value in message.extra.items() if key not in {"thinking_blocks", "reasoning"}}
+            converted.append(TextMessage(message.role, content, extra=extra))
         if instructions:
-            context = "Operating instructions:\n" + instructions
-            first_user = next((index for index, message in enumerate(messages) if message.role == "user"), None)
+            context = "Operating instructions:\n" + "\n\n".join(instructions)
+            first_user = next((index for index, message in enumerate(converted) if message.role == "user"), None)
             if first_user is None:
-                messages.insert(0, TextMessage(role="user", content=context))
+                converted.insert(0, TextMessage("user", context))
             else:
-                original = messages[first_user]
-                messages[first_user] = TextMessage(
-                    role="user",
-                    content=prepend_text(original.content, context + "\n\nUser message:"),
-                )
-
-        if request.tools and request.tool_choice != "none":
-            reminder = render_action_prompt(list(request.tools), request.tool_choice)
-            last_user = next(
-                (index for index in range(len(messages) - 1, -1, -1) if messages[index].role == "user"),
-                None,
-            )
+                original = converted[first_user]
+                converted[first_user] = replace(original, content=prepend_text(original.content, context + "\n\nUser message:"))
+        if request.tools:
+            prompt = render_action_prompt(list(request.tools), request.tool_choice)
+            if not request.parallel_tool_calls:
+                prompt += " Emit at most one operation in this response."
+            if request.tool_choice == "none":
+                prompt += " Operations are disabled; respond with ordinary text only."
+            last_user = next((index for index in range(len(converted) - 1, -1, -1) if converted[index].role == "user"), None)
             if last_user is None:
-                messages.append(TextMessage(role="user", content=reminder))
+                converted.append(TextMessage("user", prompt))
             else:
-                original = messages[last_user]
-                messages[last_user] = TextMessage(
-                    role="user",
-                    content=append_text(original.content, reminder),
-                )
-        return messages
-
-    @staticmethod
-    def _append_continuation(messages: list[TextMessage]) -> None:
-        prompt = (
-            "\n\n上一次请求已结束，但没有返回正文或实际工具调用，未执行任何操作。请继续。"
-            "如果需要操作，请输出完整合法的 @@ACTION@@ JSON 封套，"
-            "并以 @@END_ACTION@@ 结束；不要只输出思考或行动计划。"
-        )
-        last_user = next(
-            (index for index in range(len(messages) - 1, -1, -1) if messages[index].role == "user"),
-            None,
-        )
-        if last_user is None:
-            messages.append(TextMessage(role="user", content=prompt.lstrip()))
-            return
-        original = messages[last_user]
-        messages[last_user] = TextMessage(
-            role="user",
-            content=append_text(original.content, prompt),
-        )
-
-    @staticmethod
-    def _validate_choice(decoded: DecodedAction, choice: str) -> None:
-        if choice == "required" and not decoded.calls:
-            raise ActionTransportError("A required operation was not produced")
-        if choice not in {"auto", "required", "none"}:
-            if not decoded.calls or any(call.name != choice for call in decoded.calls):
-                raise ActionTransportError(f"The required operation {choice!r} was not produced exclusively")
-        if choice == "none" and decoded.calls:
-            raise ActionTransportError("Operations are disabled for this request")
+                original = converted[last_user]
+                converted[last_user] = replace(original, content=append_text(original.content, prompt))
+        return converted

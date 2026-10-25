@@ -3,287 +3,153 @@ import unittest
 
 from relay.app import create_app
 from relay.config import RelayConfig
-from relay.engine import TextCompletionRequest, UpstreamReply
+from relay.engine import RelayEvent, UpstreamReply
+from relay.upstream import UpstreamError
 
 
-class FakeUpstream:
-    def __init__(self, replies):
-        self.replies = list(replies)
-        self.requests: list[TextCompletionRequest] = []
+class Backend:
+    def __init__(self, calls=(), fail=False):
+        self.calls = calls
+        self.fail = fail
+        self.requests = []
+        self.phase = 0
+        self.closed = False
 
-    def complete(self, request):
+    def stream(self, request):
         self.requests.append(request)
-        return self.replies.pop(0)
+        try:
+            self.phase = 1
+            yield RelayEvent("reasoning", "thinking")
+            self.phase = 2
+            yield RelayEvent("text", "first ")
+            self.phase = 3
+            yield RelayEvent("text", "second")
+            if self.fail:
+                raise UpstreamError("transport stopped")
+            self.phase = 4
+            yield RelayEvent("reply", reply=UpstreamReply("first second", "thinking", {"prompt_tokens": 2, "completion_tokens": 3},
+                                                        "tool_calls" if self.calls else "stop", tuple(self.calls)))
+        finally:
+            self.closed = True
 
-    def models(self):
-        return {"object": "list", "data": [{"id": "chatglm", "object": "model"}]}
 
-
-def reply(content):
-    return UpstreamReply(content=content, usage={"prompt_tokens": 10, "completion_tokens": 5})
-
-
-SCHEMA = {
-    "type": "object",
-    "properties": {"path": {"type": "string"}},
-    "required": ["path"],
-    "additionalProperties": False,
-}
-
-TOOL = {
-    "type": "function",
-    "function": {
-        "name": "read_file",
-        "description": "Read a file",
-        "parameters": SCHEMA,
-    },
-}
-
-ANTHROPIC_TOOL = {
-    "name": "read_file",
-    "description": "Read a file",
-    "input_schema": SCHEMA,
-}
-
-RESPONSES_TOOL = {
-    "type": "function",
-    "name": "read_file",
-    "description": "Read a file",
-    "parameters": SCHEMA,
-}
+def data_events(raw):
+    events = []
+    for line in raw.splitlines():
+        if line.startswith("data: ") and line != "data: [DONE]":
+            events.append(json.loads(line[6:]))
+    return events
 
 
 class AppTests(unittest.TestCase):
-    def config(self, **overrides):
-        values = dict(upstream_base_url="http://upstream.invalid", upstream_action_retries=0)
-        values.update(overrides)
-        return RelayConfig(**values)
+    def client(self, backend, **kwargs):
+        return create_app(RelayConfig("http://upstream.invalid", **kwargs), backend).test_client()
 
-    def test_tool_request_is_converted_and_reconstructed(self):
-        upstream = FakeUpstream([reply(
-            'Checking. @@ACTION@@{"calls":[{"operation":"read_file","parameters":{"path":"README.md"}}]}@@END_ACTION@@'
-        )])
-        client = create_app(self.config(), upstream).test_client()
-        response = client.post("/v1/chat/completions", json={
-            "model": "chatglm",
-            "messages": [
-                {"role": "system", "content": "Follow project rules"},
-                {"role": "user", "content": "Read the file"},
-            ],
-            "tools": [TOOL],
-        })
+    def payload(self, path, **kwargs):
+        return {"model": "model", **({"input": "hello"} if path.endswith("responses") else {"messages": [{"role": "user", "content": "hello"}]}), **kwargs}
 
-        self.assertEqual(response.status_code, 200)
-        choice = response.get_json()["choices"][0]
-        self.assertEqual(choice["finish_reason"], "tool_calls")
-        self.assertEqual(choice["message"]["tool_calls"][0]["function"]["name"], "read_file")
-        self.assertEqual(
-            json.loads(choice["message"]["tool_calls"][0]["function"]["arguments"]),
-            {"path": "README.md"},
-        )
+    def test_all_protocols_start_before_backend_and_stream_incrementally(self):
+        for path in ("/v1/chat/completions", "/v1/messages", "/v1/responses"):
+            backend = Backend()
+            response = self.client(backend).post(path, json=self.payload(path, stream=True), buffered=False)
+            iterator = iter(response.response)
+            first = next(iterator).decode()
+            self.assertIn("data:", first)
+            self.assertEqual(backend.phase, 0)
+            collected = first
+            while "first " not in collected:
+                collected += next(iterator).decode()
+            self.assertEqual(backend.phase, 2)
+            collected += b"".join(iterator).decode()
+            self.assertTrue(backend.closed)
+            parsed = data_events(collected)
+            if path.endswith("responses"):
+                self.assertEqual([event["sequence_number"] for event in parsed], list(range(len(parsed))))
+                created = parsed[0]["response"]["id"]
+                self.assertEqual(parsed[-1]["response"]["id"], created)
+                additions = [event["item"]["id"] for event in parsed if event["type"] == "response.output_item.added"]
+                self.assertEqual(additions, [item["id"] for item in parsed[-1]["response"]["output"]])
+            elif path.endswith("completions"):
+                self.assertEqual(len({event["id"] for event in parsed}), 1)
 
-        sent = upstream.requests[0]
-        self.assertFalse(hasattr(sent, "tools"))
-        self.assertTrue(all(message.role != "system" for message in sent.messages))
-        self.assertIn("Follow project rules", sent.messages[0].content)
-        self.assertIn("@@ACTION@@", sent.messages[0].content)
+    def test_stream_failure_has_error_without_success_terminal(self):
+        for path, terminal in (("/v1/chat/completions", "[DONE]"), ("/v1/messages", "message_stop"),
+                               ("/v1/responses", "response.completed")):
+            backend = Backend(fail=True)
+            response = self.client(backend).post(path, json=self.payload(path, stream=True))
+            raw = response.get_data(as_text=True)
+            self.assertIn("transport stopped", raw)
+            self.assertNotIn(terminal, raw)
+            self.assertEqual(len(backend.requests), 1)
+            self.assertTrue(backend.closed)
 
-    def test_plain_text_passes_through(self):
-        upstream = FakeUpstream([reply("hello")])
-        client = create_app(self.config(), upstream).test_client()
-        response = client.post("/v1/chat/completions", json={
-            "model": "chatglm",
-            "messages": [{"role": "user", "content": "hello"}],
-        })
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.get_json()["choices"][0]["message"]["content"], "hello")
+    def test_disconnect_closes_stream(self):
+        backend = Backend()
+        response = self.client(backend).post("/v1/chat/completions", json=self.payload("/v1/chat/completions", stream=True), buffered=False)
+        iterator = iter(response.response)
+        next(iterator)
+        next(iterator)
+        self.assertEqual(backend.phase, 1)
+        response.close()
+        self.assertTrue(backend.closed)
 
-    def test_invalid_action_is_retried_before_returning(self):
-        upstream = FakeUpstream([
-            reply('@@ACTION@@{"calls":[{"operation":"read_file","parameters":{}}]}@@END_ACTION@@'),
-            reply('@@ACTION@@{"calls":[{"operation":"read_file","parameters":{"path":"README.md"}}]}@@END_ACTION@@'),
-        ])
-        client = create_app(self.config(upstream_action_retries=1), upstream).test_client()
-        response = client.post("/v1/chat/completions", json={
-            "messages": [{"role": "user", "content": "Read the file"}],
-            "tools": [TOOL],
-        })
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(len(upstream.requests), 2)
-        self.assertIn("nothing was executed", upstream.requests[1].messages[-1].content)
-
-    def test_tool_result_history_is_text_encoded(self):
-        upstream = FakeUpstream([reply("done")])
-        client = create_app(self.config(), upstream).test_client()
-        response = client.post("/v1/chat/completions", json={
-            "messages": [
-                {"role": "assistant", "tool_calls": [{
-                    "id": "call_1",
-                    "type": "function",
-                    "function": {"name": "read_file", "arguments": '{"path":"README.md"}'},
-                }]},
-                {"role": "tool", "tool_call_id": "call_1", "content": "contents"},
-            ],
-            "tools": [TOOL],
+    def test_native_external_id_preserved_nonstream(self):
+        call = {"id": "external", "type": "function", "function": {"name": "ping", "arguments": "{}"}}
+        backend = Backend([call])
+        response = self.client(backend).post("/v1/chat/completions", json={
+            "messages": [{"role": "developer", "content": "rules"}, {"role": "user", "content": "go"}],
+            "tools": [{"type": "function", "function": {"name": "ping", "parameters": {"type": "object"}}}],
         })
         self.assertEqual(response.status_code, 200)
-        self.assertIn("@@ACTION@@", upstream.requests[0].messages[0].content)
-        self.assertIn("@@RESULT@@", upstream.requests[0].messages[1].content)
+        self.assertEqual(response.json["choices"][0]["message"]["tool_calls"][0]["id"], "external")
+        self.assertEqual(backend.requests[0].messages[0].role, "developer")
 
-    def test_buffered_stream_reconstructs_tool_call(self):
-        action = '@@ACTION@@{"calls":[{"operation":"read_file","parameters":{"path":"README.md"}}]}@@END_ACTION@@'
-        upstream = FakeUpstream([reply(action)])
-        client = create_app(self.config(), upstream).test_client()
-        response = client.post("/v1/chat/completions", json={
-            "stream": True,
-            "messages": [{"role": "user", "content": "Read"}],
-            "tools": [TOOL],
+    def test_responses_custom_namespace_lifecycle(self):
+        backend = Backend([{"id": "custom-id", "type": "function", "function": {"name": "fs.apply", "arguments": '{"input":"patch"}'}}])
+        response = self.client(backend).post("/v1/responses", json={
+            "input": "apply", "stream": True,
+            "tools": [{"type": "namespace", "name": "fs", "tools": [{"type": "custom", "name": "apply", "format": {"type": "text"}}]}],
         })
-        self.assertIn(b'"tool_calls"', response.data)
-        self.assertIn(b'"finish_reason": "tool_calls"', response.data)
-        self.assertTrue(response.data.endswith(b"data: [DONE]\n\n"))
+        parsed = data_events(response.get_data(as_text=True))
+        output = parsed[-1]["response"]["output"][-1]
+        self.assertEqual(output["type"], "custom_tool_call")
+        self.assertEqual(output["call_id"], "custom-id")
+        self.assertEqual(output["namespace"], "fs")
+        self.assertEqual(output["name"], "apply")
+        self.assertEqual(output["input"], "patch")
+        self.assertIn("response.custom_tool_call_input.done", [event["type"] for event in parsed])
 
-    def test_auth_and_models(self):
-        upstream = FakeUpstream([])
-        client = create_app(self.config(relay_api_key="test-only-key"), upstream).test_client()
-        self.assertEqual(client.get("/v1/models").status_code, 401)
-        headers = {"Authorization": "Bearer test-only-key"}
-        self.assertEqual(client.get("/v1/models", headers=headers).status_code, 200)
+    def test_unsupported_persistent_state_and_grammar_are_400(self):
+        for extra in ({"previous_response_id": "resp_old"}, {"store": True}, {"input": [{"type": "item_reference", "id": "old"}]},
+                      {"tools": [{"type": "custom", "name": "x", "format": {"type": "grammar", "definition": "x"}}]},
+                      {"tools": [{"type": "computer_use_preview"}]}):
+            backend = Backend()
+            response = self.client(backend).post("/v1/responses", json={"input": "hello", **extra})
+            self.assertEqual(response.status_code, 400)
+            self.assertEqual(backend.requests, [])
 
-    def test_all_three_protocol_routes_are_exposed(self):
-        action = '@@ACTION@@{"calls":[{"operation":"read_file","parameters":{"path":"README.md"}}]}@@END_ACTION@@'
-        client = create_app(self.config(), FakeUpstream([reply(action), reply(action), reply(action)])).test_client()
-        self.assertEqual(client.post("/v1/chat/completions", json={
-            "messages": [{"role": "user", "content": "Read"}], "tools": [TOOL],
-        }).status_code, 200)
-        self.assertEqual(client.post("/v1/messages", json={
-            "messages": [{"role": "user", "content": "Read"}], "tools": [ANTHROPIC_TOOL],
-        }).status_code, 200)
-        self.assertEqual(client.post("/v1/responses", json={
-            "input": "Read", "tools": [RESPONSES_TOOL],
-        }).status_code, 200)
+    def test_authentication_still_applies(self):
+        response = self.client(Backend(), relay_api_key="test-key").post("/v1/chat/completions", json={"messages": []})
+        self.assertEqual(response.status_code, 401)
 
-    def test_messages_request_is_converted_and_reconstructed(self):
-        upstream = FakeUpstream([reply(
-            'Reading. @@ACTION@@{"calls":[{"operation":"read_file","parameters":{"path":"README.md"}}]}@@END_ACTION@@'
-        )])
-        client = create_app(self.config(), upstream).test_client()
-        response = client.post("/v1/messages", json={
-            "model": "chatglm",
-            "max_tokens": 512,
-            "system": [{"type": "text", "text": "Follow project rules"}],
-            "messages": [{"role": "user", "content": "Read the file"}],
-            "tools": [ANTHROPIC_TOOL],
+    def test_invalid_batch_emits_no_partial_tool_call(self):
+        valid = {"id": "valid", "type": "function", "function": {"name": "ping", "arguments": "{}"}}
+        invalid = {"id": "invalid", "type": "function", "function": {"name": "unknown", "arguments": "{}"}}
+        backend = Backend([valid, invalid])
+        response = self.client(backend).post("/v1/chat/completions", json={
+            "messages": [{"role": "user", "content": "go"}], "stream": True,
+            "tools": [{"type": "function", "function": {"name": "ping", "parameters": {"type": "object"}}}],
         })
+        raw = response.get_data(as_text=True)
+        self.assertIn('"error"', raw)
+        self.assertNotIn('"tool_calls":', raw)
+        self.assertNotIn("[DONE]", raw)
 
-        self.assertEqual(response.status_code, 200)
-        payload = response.get_json()
-        self.assertEqual(payload["type"], "message")
-        self.assertEqual(payload["role"], "assistant")
-        self.assertEqual(payload["stop_reason"], "tool_use")
-        block = payload["content"][-1]
-        self.assertEqual(block["type"], "tool_use")
-        self.assertEqual(block["name"], "read_file")
-        self.assertEqual(block["input"], {"path": "README.md"})
-
-        sent = upstream.requests[0]
-        self.assertFalse(hasattr(sent, "tools"))
-        self.assertTrue(all(message.role != "system" for message in sent.messages))
-        self.assertIn("Follow project rules", sent.messages[0].content)
-        self.assertIn("@@ACTION@@", sent.messages[0].content)
-
-    def test_messages_history_and_streaming(self):
-        action = '@@ACTION@@{"calls":[{"operation":"read_file","parameters":{"path":"README.md"}}]}@@END_ACTION@@'
-        upstream = FakeUpstream([reply(action)])
-        client = create_app(self.config(), upstream).test_client()
-        response = client.post("/v1/messages", json={
-            "stream": True,
-            "messages": [
-                {"role": "assistant", "content": [
-                    {"type": "tool_use", "id": "toolu_1", "name": "read_file", "input": {"path": "README.md"}},
-                ]},
-                {"role": "user", "content": [
-                    {"type": "tool_result", "tool_use_id": "toolu_1", "content": "contents"},
-                ]},
-            ],
-            "tools": [ANTHROPIC_TOOL],
+    def test_tool_choice_none_is_enforced_without_replay(self):
+        backend = Backend([{"id": "external", "type": "function", "function": {"name": "ping", "arguments": "{}"}}])
+        response = self.client(backend).post("/v1/chat/completions", json={
+            "messages": [{"role": "user", "content": "go"}], "tool_choice": "none",
+            "tools": [{"type": "function", "function": {"name": "ping", "parameters": {"type": "object"}}}],
         })
-        self.assertIn(b"event: content_block_delta", response.data)
-        self.assertIn(b"event: message_stop", response.data)
-        self.assertIn("@@ACTION@@", upstream.requests[0].messages[0].content)
-        self.assertIn("@@RESULT@@", upstream.requests[0].messages[1].content)
-
-    def test_messages_count_tokens(self):
-        client = create_app(self.config(), FakeUpstream([])).test_client()
-        response = client.post("/v1/messages/count_tokens", json={
-            "messages": [{"role": "user", "content": "hello"}], "tools": [ANTHROPIC_TOOL],
-        })
-        self.assertEqual(response.status_code, 200)
-        self.assertGreater(response.get_json()["input_tokens"], 0)
-
-    def test_responses_request_is_converted_and_reconstructed(self):
-        upstream = FakeUpstream([reply(
-            'Reading. @@ACTION@@{"calls":[{"operation":"read_file","parameters":{"path":"README.md"}}]}@@END_ACTION@@'
-        )])
-        client = create_app(self.config(), upstream).test_client()
-        response = client.post("/v1/responses", json={
-            "model": "chatglm",
-            "instructions": "Follow project rules",
-            "input": "Read the file",
-            "tools": [RESPONSES_TOOL],
-        })
-
-        self.assertEqual(response.status_code, 200)
-        payload = response.get_json()
-        self.assertEqual(payload["object"], "response")
-        self.assertEqual(payload["status"], "completed")
-        call = next(item for item in payload["output"] if item["type"] == "function_call")
-        self.assertEqual(call["name"], "read_file")
-        self.assertEqual(json.loads(call["arguments"]), {"path": "README.md"})
-        self.assertIn("Reading.", payload["output_text"])
-
-        sent = upstream.requests[0]
-        self.assertFalse(hasattr(sent, "tools"))
-        self.assertIn("Follow project rules", sent.messages[0].content)
-
-    def test_responses_history_streaming_and_input_tokens(self):
-        action = '@@ACTION@@{"calls":[{"operation":"read_file","parameters":{"path":"README.md"}}]}@@END_ACTION@@'
-        upstream = FakeUpstream([reply(action)])
-        client = create_app(self.config(), upstream).test_client()
-        response = client.post("/v1/responses", json={
-            "stream": True,
-            "input": [
-                {"type": "function_call", "call_id": "call_1", "name": "read_file", "arguments": '{"path":"README.md"}'},
-                {"type": "function_call_output", "call_id": "call_1", "output": "contents"},
-            ],
-            "tools": [RESPONSES_TOOL],
-        })
-        self.assertIn(b"event: response.function_call_arguments.delta", response.data)
-        self.assertIn(b"event: response.completed", response.data)
-        self.assertIn("@@ACTION@@", upstream.requests[0].messages[0].content)
-        self.assertIn("@@RESULT@@", upstream.requests[0].messages[1].content)
-
-        counted = client.post("/v1/responses/input_tokens", json={
-            "input": "hello", "tools": [RESPONSES_TOOL],
-        })
-        self.assertEqual(counted.status_code, 200)
-        self.assertGreater(counted.get_json()["input_tokens"], 0)
-
-    def test_invalid_request_and_tool_schema_return_400(self):
-        client = create_app(self.config(), FakeUpstream([])).test_client()
-        self.assertEqual(client.post("/v1/chat/completions", json=[]).status_code, 400)
-        response = client.post("/v1/chat/completions", json={
-            "messages": [{"role": "user", "content": "hello"}],
-            "tools": [{
-                "type": "function",
-                "function": {
-                    "name": "bad",
-                    "parameters": {"type": "not-a-json-schema-type"},
-                },
-            }],
-        })
-        self.assertEqual(response.status_code, 400)
-
-
-if __name__ == "__main__":
-    unittest.main()
+        self.assertEqual(response.status_code, 502)
+        self.assertEqual(len(backend.requests), 1)

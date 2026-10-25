@@ -4,7 +4,7 @@ from .app import create_app
 from .engine import (
     RelayRequest,
     RelayResult,
-    TextActionRelay,
+    ActionRelay,
     TextCompletionRequest,
     TextMessage,
     UpstreamReply,
@@ -13,7 +13,7 @@ from .engine import (
 __all__ = [
     "RelayRequest",
     "RelayResult",
-    "TextActionRelay",
+    "ActionRelay",
     "TextCompletionRequest",
     "TextMessage",
     "UpstreamReply",

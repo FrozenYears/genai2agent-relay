@@ -3,26 +3,36 @@ from __future__ import annotations
 import json
 import time
 import uuid
-from typing import Any, Iterable
+from copy import deepcopy
+from dataclasses import replace
+from typing import Any
 
-from .actions import ToolSpec, encode_calls, encode_result
-from .content import attachments_of, build_content, file_block, image_block, text_of
+from .actions import ToolSpec
+from .content import build_content, file_block, image_block, text_of
 from .engine import RelayRequest, RelayResult, TextMessage
 from .features import request_options
+from .normalize import (
+    SEARCH_TOOL_TYPES, _unique_tools, custom_schema, history_call_id,
+    normalize_history_call, normalize_history_calls, parallel_calls,
+    tool_items, tool_name, tool_schema, tool_strict, validate_choice,
+)
 
 
 def _items(value: Any) -> list[dict[str, Any]]:
-    if isinstance(value, list):
-        return [item for item in value if isinstance(item, dict)]
-    return []
+    if value is None:
+        return []
+    if not isinstance(value, list) or any(not isinstance(item, dict) for item in value):
+        raise ValueError("input must be a string or an array of objects")
+    return value
 
 
-def _arguments(value: Any) -> dict[str, Any]:
-    try:
-        parsed = json.loads(value) if isinstance(value, str) else value
-    except json.JSONDecodeError:
-        return {"raw": value}
-    return parsed if isinstance(parsed, dict) else {"raw": value}
+def _qualified_name(item: dict[str, Any]) -> tuple[str, str | None]:
+    name = tool_name(item.get("name"))
+    namespace = item.get("namespace")
+    if namespace is not None:
+        namespace = tool_name(namespace)
+        return f"{namespace}.{name}", namespace
+    return name, None
 
 
 def _file_source(part: dict[str, Any]) -> dict[str, Any]:
@@ -33,7 +43,7 @@ def _file_source(part: dict[str, Any]) -> dict[str, Any]:
 
 
 def response_content(content: Any) -> str | list[dict[str, Any]]:
-    """Preserve text, image and file parts of a Responses content array."""
+    """保留 Responses 内容中的文本、图片和文件。"""
     if isinstance(content, str) or content is None:
         return content or ""
     if not isinstance(content, list):
@@ -65,86 +75,144 @@ def response_content(content: Any) -> str | list[dict[str, Any]]:
 
 def response_tools(raw_tools: Any) -> list[ToolSpec]:
     result: list[ToolSpec] = []
-    names: set[str] = set()
-    for item in raw_tools or []:
-        if not isinstance(item, dict) or item.get("type") != "function":
-            continue
-        name = str(item.get("name") or "")
-        if not name or name in names:
-            continue
-        names.add(name)
-        schema = item.get("parameters")
-        result.append(ToolSpec(
-            name=name,
-            description=str(item.get("description") or ""),
-            parameters=schema if isinstance(schema, dict) else {"type": "object"},
-        ))
-    return result
+    declared: set[str] = set()
+
+    def add(item: dict[str, Any], namespace: str | None = None) -> None:
+        kind = item.get("type")
+        if kind in SEARCH_TOOL_TYPES and namespace is None:
+            name = tool_name(item.get("name", "web_search"))
+        elif kind in {"function", "custom"}:
+            leaf = tool_name(item.get("name"))
+            name = f"{namespace}.{leaf}" if namespace else leaf
+            if kind == "custom":
+                schema = custom_schema(item.get("format"))
+            else:
+                schema = tool_schema(item.get("parameters"))
+            result.append(ToolSpec(
+                name=name,
+                description=str(item.get("description") or ""),
+                parameters=schema,
+                kind=kind,
+                namespace=namespace,
+                strict=tool_strict(item.get("strict")),
+            ))
+        else:
+            raise ValueError(f"Unsupported Responses tool type: {kind!r}")
+        if name in declared:
+            raise ValueError(f"Duplicate tool name: {name}")
+        declared.add(name)
+
+    namespaces: set[str] = set()
+    for item in tool_items(raw_tools):
+        if item.get("type") == "namespace":
+            namespace = tool_name(item.get("name"))
+            if namespace in namespaces:
+                raise ValueError(f"Duplicate tool namespace: {namespace}")
+            namespaces.add(namespace)
+            for child in tool_items(item.get("tools")):
+                add(child, namespace)
+        else:
+            add(item)
+    return _unique_tools(result)
 
 
 def normalize_choice(choice: Any) -> str:
     if choice is None:
         return "auto"
-    if isinstance(choice, str):
-        return choice if choice in {"auto", "none", "required"} else "auto"
-    if not isinstance(choice, dict):
-        return "auto"
-    kind = choice.get("type")
-    if kind in {"auto", "none", "required"}:
-        return kind
-    if kind == "function":
-        return str(choice.get("name") or "auto")
-    return "auto"
+    if isinstance(choice, str) and choice in {"auto", "none", "required"}:
+        return choice
+    if isinstance(choice, dict) and choice.get("type") in {"function", "custom"}:
+        return _qualified_name(choice)[0]
+    raise ValueError("Unsupported Responses tool_choice")
 
 
 def prepare_responses(body: dict[str, Any], tools: list[ToolSpec], choice: str) -> RelayRequest:
+    if body.get("previous_response_id") is not None:
+        raise ValueError("previous_response_id is unsupported; send complete input history")
+    if "storage" in body:
+        raise ValueError("storage is unsupported")
+    if "store" in body and not isinstance(body["store"], bool):
+        raise ValueError("store must be a boolean")
+    if body.get("store") is True:
+        raise ValueError("store=true is unsupported")
+    choice = validate_choice(choice, tools, body)
     instructions = text_of(body.get("instructions"))
     raw_input = body.get("input")
     messages: list[TextMessage] = []
+    seen_ids: set[str] = set()
     if isinstance(raw_input, str):
-        if raw_input:
-            messages.append(TextMessage(role="user", content=raw_input))
+        messages.append(TextMessage(role="user", content=raw_input))
     else:
         for item in _items(raw_input):
-            kind = item.get("type")
-            if kind in {"reasoning", "item_reference"}:
-                # Historical chain-of-thought is not replayed to the first hop.
-                continue
-            if kind == "function_call":
-                arguments = item.get("arguments")
-                try:
-                    parameters = json.loads(arguments) if isinstance(arguments, str) else arguments
-                except json.JSONDecodeError:
-                    parameters = {"raw": arguments}
-                messages.append(TextMessage(role="assistant", content=encode_calls([{
-                    "operation": str(item.get("name") or ""),
-                    "parameters": parameters if isinstance(parameters, dict) else {},
-                }])))
-                continue
-            if kind == "function_call_output":
-                raw = response_content(item.get("output"))
-                envelope = encode_result(str(item.get("call_id") or "unknown"), text_of(raw))
+            kind = item.get("type", "message")
+            if kind == "item_reference":
+                raise ValueError("item_reference is unsupported; send the complete item")
+            if kind == "reasoning":
+                reasoning = "\n".join(
+                    str(part.get("text") or "")
+                    for key in ("summary", "content")
+                    for part in item.get(key) or []
+                    if isinstance(part, dict) and part.get("text")
+                )
                 messages.append(TextMessage(
-                    role="user",
-                    content=build_content([envelope], attachments_of(raw)),
+                    role="assistant", content="", reasoning_content=reasoning,
+                    extra={"reasoning": deepcopy(item)},
                 ))
                 continue
-            role = "assistant" if item.get("role") == "assistant" else "user"
-            content = response_content(item.get("content"))
-            if role == "assistant" and item.get("tool_calls"):
-                content = build_content([
-                    text_of(content),
-                    encode_calls([
-                        {
-                            "operation": str((call.get("function") or {}).get("name") or ""),
-                            "parameters": _arguments((call.get("function") or {}).get("arguments")),
-                        }
-                        for call in item["tool_calls"]
-                        if isinstance(call, dict)
-                    ]),
-                ], attachments_of(content))
-            if text_of(content) or attachments_of(content):
-                messages.append(TextMessage(role=role, content=content))
+            if kind in {"function_call", "custom_tool_call"}:
+                name, _ = _qualified_name(item)
+                if kind == "custom_tool_call":
+                    if not isinstance(item.get("input"), str):
+                        raise ValueError("custom_tool_call.input must be a string")
+                    arguments = json.dumps({"input": item["input"]}, ensure_ascii=False, separators=(",", ":"))
+                else:
+                    arguments = item.get("arguments")
+                    if not isinstance(arguments, str):
+                        raise ValueError("function_call.arguments must be a JSON string")
+                call = normalize_history_call({
+                    "id": item.get("call_id"),
+                    "type": "function",
+                    "function": {"name": name, "arguments": arguments},
+                }, seen_ids)
+                if messages and messages[-1].role == "assistant":
+                    previous = messages[-1]
+                    messages[-1] = replace(previous, tool_calls=previous.tool_calls + (call,))
+                else:
+                    messages.append(TextMessage(role="assistant", content="", tool_calls=(call,)))
+                continue
+            if kind in {"function_call_output", "custom_tool_call_output"}:
+                messages.append(TextMessage(
+                    role="tool",
+                    tool_call_id=history_call_id(item.get("call_id")),
+                    content=response_content(item.get("output")),
+                    extra=deepcopy({
+                        key: value for key, value in item.items()
+                        if key not in {"type", "call_id", "output"}
+                    }),
+                ))
+                continue
+            if kind == "web_search_call":
+                messages.append(TextMessage(role="assistant", content="", extra={"web_search_call": deepcopy(item)}))
+                continue
+            if kind != "message":
+                raise ValueError(f"Unsupported Responses input item type: {kind!r}")
+            role = item.get("role", "user")
+            if role not in {"system", "developer", "user", "assistant", "tool"}:
+                raise ValueError(f"Unsupported message role: {role!r}")
+            calls = normalize_history_calls(item.get("tool_calls"), seen_ids)
+            if calls and role != "assistant":
+                raise ValueError("Only assistant messages may contain tool_calls")
+            messages.append(TextMessage(
+                role=role,
+                content=response_content(item.get("content")),
+                tool_calls=calls,
+                tool_call_id=history_call_id(item.get("tool_call_id")) if role == "tool" else item.get("tool_call_id"),
+                reasoning_content=item.get("reasoning_content") or "",
+                extra=deepcopy({
+                    key: value for key, value in item.items()
+                    if key not in {"type", "role", "content", "tool_calls", "tool_call_id", "reasoning_content"}
+                }),
+            ))
 
     sampling = {key: body[key] for key in ("temperature", "top_p") if key in body}
     return RelayRequest(
@@ -153,6 +221,7 @@ def prepare_responses(body: dict[str, Any], tools: list[ToolSpec], choice: str) 
         instructions=instructions,
         tools=tuple(tools),
         tool_choice=choice,
+        parallel_tool_calls=parallel_calls(body),
         max_tokens=int(body.get("max_output_tokens") or 8192),
         sampling=sampling,
         upstream_options=request_options(body, body.get("tools"), "responses"),
@@ -184,17 +253,22 @@ def build_output(result: RelayResult) -> list[dict[str, Any]]:
             "role": "assistant",
             "content": [{"type": "output_text", "text": decoded.text, "annotations": []}],
         })
-    output.extend(
-        {
-            "type": "function_call",
-            "id": "fc_" + uuid.uuid4().hex[:24],
-            "call_id": "call_" + uuid.uuid4().hex[:24],
-            "name": call.name,
-            "arguments": json.dumps(call.parameters, ensure_ascii=False, separators=(",", ":")),
+    for call in decoded.calls:
+        custom = call.kind == "custom"
+        item = {
+            "type": "custom_tool_call" if custom else "function_call",
+            "id": ("ctc_" if custom else "fc_") + uuid.uuid4().hex[:24],
+            "call_id": call.id,
+            "name": call.name.removeprefix(call.namespace + ".") if call.namespace else call.name,
             "status": "completed",
         }
-        for call in decoded.calls
-    )
+        if call.namespace:
+            item["namespace"] = call.namespace
+        if custom:
+            item["input"] = call.parameters["input"]
+        else:
+            item["arguments"] = json.dumps(call.parameters, ensure_ascii=False, separators=(",", ":"))
+        output.append(item)
     return output
 
 
@@ -220,98 +294,17 @@ def build_response(body: dict[str, Any], result: RelayResult) -> dict[str, Any]:
         "model": body.get("model") or "chatglm",
         "output": output,
         "output_text": text,
-        "parallel_tool_calls": True,
+        "parallel_tool_calls": body.get("parallel_tool_calls", True),
         "tool_choice": body.get("tool_choice") or "auto",
         "tools": body.get("tools") or [],
         "usage": _usage(result),
     }
 
 
-def _reasoning_events(index: int, item: dict[str, Any]) -> Iterable[str]:
-    item_id = item["id"]
-    text = item["summary"][0]["text"] if item["summary"] else ""
-
-    def emit(event: str, data: dict[str, Any]) -> str:
-        return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
-
-    yield emit("response.output_item.added", {
-        "type": "response.output_item.added", "output_index": index,
-        "item": {**item, "status": "in_progress", "summary": []},
-    })
-    yield emit("response.reasoning_summary_part.added", {
-        "type": "response.reasoning_summary_part.added", "item_id": item_id,
-        "output_index": index, "summary_index": 0, "part": {"type": "summary_text", "text": ""},
-    })
-    yield emit("response.reasoning_summary_text.delta", {
-        "type": "response.reasoning_summary_text.delta", "item_id": item_id,
-        "output_index": index, "summary_index": 0, "delta": text,
-    })
-    yield emit("response.reasoning_summary_text.done", {
-        "type": "response.reasoning_summary_text.done", "item_id": item_id,
-        "output_index": index, "summary_index": 0, "text": text,
-    })
-    yield emit("response.reasoning_summary_part.done", {
-        "type": "response.reasoning_summary_part.done", "item_id": item_id,
-        "output_index": index, "summary_index": 0, "part": {"type": "summary_text", "text": text},
-    })
-
-
-def stream_events(body: dict[str, Any], result: RelayResult) -> Iterable[str]:
-    response = build_response(body, result)
-
-    def emit(event: str, data: dict[str, Any]) -> str:
-        return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
-
-    yield emit("response.created", {
-        "type": "response.created",
-        "response": {**response, "status": "in_progress", "output": [], "output_text": ""},
-    })
-    for index, item in enumerate(response["output"]):
-        if item["type"] == "reasoning":
-            yield from _reasoning_events(index, item)
-        elif item["type"] == "message":
-            yield emit("response.output_item.added", {
-                "type": "response.output_item.added", "output_index": index,
-                "item": {**item, "status": "in_progress", "content": []},
-            })
-            yield emit("response.content_part.added", {
-                "type": "response.content_part.added", "item_id": item["id"],
-                "output_index": index, "content_index": 0,
-                "part": {"type": "output_text", "text": "", "annotations": []},
-            })
-            yield emit("response.output_text.delta", {
-                "type": "response.output_text.delta", "item_id": item["id"],
-                "output_index": index, "content_index": 0, "delta": item["content"][0]["text"],
-            })
-            yield emit("response.output_text.done", {
-                "type": "response.output_text.done", "item_id": item["id"],
-                "output_index": index, "content_index": 0, "text": item["content"][0]["text"],
-            })
-            yield emit("response.content_part.done", {
-                "type": "response.content_part.done", "item_id": item["id"],
-                "output_index": index, "content_index": 0, "part": item["content"][0],
-            })
-        else:
-            yield emit("response.output_item.added", {
-                "type": "response.output_item.added", "output_index": index,
-                "item": {**item, "arguments": "", "status": "in_progress"},
-            })
-            yield emit("response.function_call_arguments.delta", {
-                "type": "response.function_call_arguments.delta", "item_id": item["id"],
-                "output_index": index, "delta": item["arguments"],
-            })
-            yield emit("response.function_call_arguments.done", {
-                "type": "response.function_call_arguments.done", "item_id": item["id"],
-                "output_index": index, "arguments": item["arguments"],
-            })
-        yield emit("response.output_item.done", {
-            "type": "response.output_item.done", "output_index": index, "item": item,
-        })
-    yield emit("response.completed", {"type": "response.completed", "response": response})
 
 
 def estimate_tokens(body: dict[str, Any], tools: list[ToolSpec]) -> int:
-    """Rough character-based estimate. This transport never calls the model to count."""
+    """按字符数粗估 token，不为计数调用模型。"""
     total = len(text_of(body.get("instructions")))
     raw_input = body.get("input")
     if isinstance(raw_input, str):

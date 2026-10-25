@@ -1,266 +1,187 @@
 # GenAI2AgentRelay
 
-GenAI2AgentRelay converts native function-tool requests into a validated
-plain-text action transport. It is designed as a second hop behind
-[`jollyxenon/shanghaitech-genai2api`](https://github.com/jollyxenon/shanghaitech-genai2api),
-or any other upstream that accepts ordinary OpenAI-style chat messages but
-cannot reliably return native tool calls.
+A native-first streaming gateway for OpenAI Chat Completions, Anthropic Messages,
+and OpenAI Responses. Tool execution always remains in the downstream agent;
+this service does not execute commands or access files named in tool arguments.
 
-The built-in HTTP adapter exposes OpenAI Chat Completions, Anthropic Messages,
-and OpenAI Responses. The conversion engine itself has no Flask, SSE, or
-coding-agent dependency.
+## Transport modes
 
-## How it works
+`UPSTREAM_TOOL_MODE=native` is the default. The relay forwards tool definitions,
+system/developer roles, assistant calls, and tool results to an OpenAI-compatible
+Chat Completions backend. It consumes upstream SSE immediately, preserves call
+IDs, validates the entire final call batch, and adapts it to the client protocol.
+It never downgrades a failed native request to another model generation.
 
-```text
-OpenAI-compatible client
-  POST /v1/chat/completions with messages + tools
-               |
-               v
-GenAI2AgentRelay
-  1. removes native tool and system-role channels
-  2. renders tool schemas into ordinary conversation text
-  3. encodes earlier calls/results as text envelopes
-               |
-               v
-Plain-text chat completion backend
-  jollyxenon/shanghaitech-genai2api by default
-               |
-               v
-Complete @@ACTION@@ JSON envelope
-  buffered -> parsed -> allowlisted -> JSON-Schema validated
-               |
-               v
-OpenAI-compatible tool_calls response
-```
+The default backend is `shanghaitech-genai2api` on port 31100. That first hop still
+uses the university web-chat endpoint: it handles website login, attachments,
+and the website's text-based tool fallback. Its support for parsing Kimi/DeepSeek
+native syntax does not prove that the website accepts native tool request fields.
+Upgrade both repositories together for the new default path.
 
-The upstream model requests an operation using ordinary text:
+Use `UPSTREAM_TOOL_MODE=text` only for an explicitly text-only backend. This mode
+encodes tool definitions and history in ordinary conversation text. Historical
+calls retain their IDs and results refer to those IDs, including out-of-order
+results. The current schemas are placed near the latest user turn; system and
+developer instructions become ordinary context. User/result control markers are
+reversibly escaped without modifying attachments or historical call envelopes.
+
+An actual text-mode call must be a single final envelope:
 
 ```text
 @@ACTION@@{"calls":[{"operation":"read_file","parameters":{"path":"README.md"}}]}@@END_ACTION@@
 ```
 
-Tool execution remains entirely in the downstream client. This service never
-executes a command, reads a requested file, or invokes a submitted tool.
+A call may include an explicit unique string `id`; otherwise one is assigned.
+Quoted examples and inline thinking are not executable actions. Code-fenced JSON
+examples are no longer retried into actions. There is no delimiter repair,
+parameter renaming, type guessing, or selection of the last valid envelope from
+an invalid response.
 
-## Safety properties
+## Streaming and execution boundary
 
-- Native `tools` and `system` roles are never sent to the first hop.
-- Only a complete, final action envelope is considered a call.
-- Closed code quotations of the action envelope remain documentation, not executable actions. However, without a normal action envelope, JSON call arrays/objects in code fences or `<parameter name="calls">` blocks referencing current tools trigger correction before delivery. Such examples may also trigger correction intentionally. Alternate formats are never executed directly; ordinary data and valid action parameters remain unchanged.
-- Each operation must occur in the current request's allowlist.
-- Parameters are validated against the tool's supplied JSON Schema.
-- Partial, oversized, malformed, unknown, and native-token calls are rejected.
-- Invalid model serialization can be retried before any call is returned.
-- Outside closed code quotations, `@@ACTION@` and an end marker before a valid opening marker trigger serialization retry instead of plain-text completion. Delimiters are never auto-repaired for execution.
-- The action prompt asks models to emit only a complete envelope, preserve user-supplied strings literally, wait for dependent tool results, and read back file changes when a read operation is available. This is guidance, not semantic validation: the relay cannot prove that model-generated file contents match the user's intent, so clients must inspect tool results and verify important writes.
-- Native syntax checks exclude closed Markdown quotations and the parameters of a valid action envelope. A final verification answer may quote tool/DSML markers without starting another serialization retry. Result envelopes explicitly identify their content as the outcome of an already-executed operation; once verification is complete the model is instructed to answer normally rather than repeating the same read.
-- Request bodies, arguments, and credentials are not logged.
+All three client protocols send their opening event before model completion.
+Ordinary text and reasoning arrive incrementally. Tool arguments are buffered
+until normal upstream termination and full validation; a partial argument delta
+is never an executable call. Responses events have monotonically increasing
+`sequence_number` values and stable lifecycle IDs.
 
-This is a transport boundary, not a permission system. The downstream client
-must still authorize and sandbox tool execution.
+The relay forwards upstream heartbeat comments as Chat/Responses comments or
+Messages `ping` events. It does not invent a separate timed heartbeat worker.
+The accompanying first hop emits heartbeats while waiting for its backend.
 
-JSON syntax retries include the parse reason and location within the envelope body; their client-facing errors are unchanged. Empty or reasoning-only replies request continuation using the same retry budget instead of ending the turn successfully; exhaustion returns an upstream error. Normal text replies remain valid without tools. See [封套与纯思考回复小修记录](docs/action-envelope-fixes.zh-CN.md) for comparisons, verification, and rollback.
+Errors after headers are sent arrive as protocol error events, without a success
+completion. Non-streaming failures return HTTP 502. Closing a consumed stream
+closes the upstream HTTP response. A blocked connection before response headers
+is still bounded by the configured timeouts, not guaranteed to cancel instantly.
 
-The full current tool schemas are appended near the latest user turn instead of the start of history; original instructions, history, and attachments are retained. Structural/parameter retries include actionable feedback and the relevant tool schema when identifiable, without translating arguments automatically. An upstream `finish_reason=length` is rejected immediately with an explicit truncation error, even if a complete-looking call is present: no same-budget serialization retry or partial execution. No additional logging, dependencies, or retry allowance is introduced.
-Empty-response retries append the continuation instruction to the current user turn instead of creating consecutive user messages; reasoning is not copied as assistant text. This reduces retry-shape drift for long contexts but does not bypass upstream context or output limits.
+Native mode never retries model generation. Text mode may retry a clearly
+attempted malformed action envelope only while no text/reasoning has been
+delivered. Truncation, ordinary examples, empty answers, and already delivered
+content are not silently replayed. The retry budget does not cover executing tools.
+
+## Validation and compatibility
+
+- Every call must name a currently allowed tool and satisfy its JSON Schema.
+- `none`, `required`, named tool choice, and `parallel_tool_calls=false` are enforced.
+  Messages `disable_parallel_tool_use` maps to the same constraint.
+- A bad member rejects the complete batch: no partial execution or dropping unknown tools.
+- Duplicate JSON keys, non-finite numbers, duplicate IDs, multiple action envelopes,
+  incomplete SSE/JSON, and output truncation are rejected.
+- Schema references are local only; validation never fetches remote schemas.
+- Missing OpenAI function `parameters` means a no-argument function. Explicit `{}`
+  remains an open schema. Anthropic tools require `input_schema`.
+- Function tools, custom **text** tools, and Responses namespaces are supported.
+  Namespaces use `namespace.leaf` internally and return separate `namespace` / `name`.
+  Custom tools use an upstream function wrapper with `{"input": string}` parameters.
+- Custom grammar is not implemented and returns HTTP 400, rather than claiming
+  grammar-constrained generation. Clients such as Codex that require grammar tools
+  must use compatible declarations or a provider with the required native support.
+- `previous_response_id`, `item_reference`, and server-side storage (`store=true`)
+  are rejected. Send complete history on every request.
+- Native history preserves call IDs and reasoning metadata where expressible in
+  the Chat transport. Cross-provider encrypted reasoning is not interchangeable.
+  Messages output still uses `genai-compat-no-signature`, not a genuine Anthropic
+  signature. Responses output has no reconstructed encrypted reasoning state.
+
+These checks are a transport boundary, not authorization or a guarantee that a
+model's proposed file contents are correct. The agent must authorize/sandbox tools,
+inspect actual results, and verify important writes with execution/read-back/hash.
 
 ## Run the two-hop setup
 
-First start `jollyxenon/shanghaitech-genai2api` according to its own README. It
-must expose `POST /v1/chat/completions`; `GET /v1/models` is used for model-list
-passthrough. A typical first-hop configuration listens only on loopback:
-
-```dotenv
-GENAI_TOKEN=replace-with-your-login-token
-HOST=127.0.0.1
-PORT=31100
-API_FORMAT=openai
-API_KEY=replace-with-a-random-first-hop-key
-```
-
-Install and start this second hop:
+Start the current `shanghaitech-genai2api` build on loopback first. Then install
+this independent repository in an isolated environment:
 
 ```bash
-git clone https://github.com/negativegluon/genai2agent-relay.git
-cd genai2agent-relay
 python3 -m venv .venv
 . .venv/bin/activate
 python -m pip install -e .
 cp .env.example .env
 ```
 
-Configure `.env`:
+Configure `.env` without committing credentials:
 
 ```dotenv
 UPSTREAM_BASE_URL=http://127.0.0.1:31100
-UPSTREAM_API_KEY=replace-with-a-random-first-hop-key
+UPSTREAM_TOOL_MODE=native
+UPSTREAM_API_KEY=replace-with-first-hop-key
 RELAY_API_KEY=replace-with-a-different-downstream-key
 HOST=127.0.0.1
 PORT=31110
 ```
 
-Then run:
+Run `genai2agent-relay` or `python main.py`. Client API bases are
+`http://127.0.0.1:31110/v1` for Chat/Responses and
+`http://127.0.0.1:31110` for Messages.
 
-```bash
-genai2agent-relay
-```
+For Claude Code configuration see
+[the adapter reference](docs/claude-code-adapter-reference.zh-CN.md).
 
-`python main.py` is equivalent when run from the repository root.
+## Direct authorized API backend
 
-## Send a tool request
+A normal OpenAI-compatible Chat API can replace the website first hop. Set
+`UPSTREAM_BASE_URL` to its authorized API base and `UPSTREAM_API_KEY` to that API's
+own key, keeping native mode. A base without a path gets `/v1` appended; a base
+with a path (for example `/v1` or `/api/v1/start`) is used as-is. The adapter then
+appends `/chat/completions` or `/models`.
 
-Point any OpenAI Chat Completions client at `http://127.0.0.1:31110/v1`.
-For example:
+ShanghaiTech's [GenAI API / OpenClaw guide](https://aiplat.shanghaitech.edu.cn/_upload/article/files/9e/52/e8e9d4574a4386cb0ccf1614b548/fe158a03-d45e-41db-a895-d3400cf328bf.pdf)
+shows `https://genaiapi.shanghaitech.edu.cn/api/v1/start` as an example API base,
+with a separate personal API Key and network authorization. Use the actual
+approved endpoint and model ID. Do not reuse website JWTs or campus passwords.
+This documented university API route has not been exercised with an authorized
+API Key during the refactor; website-model verification is not evidence of that
+route's tool or reasoning capabilities.
 
-```bash
-curl http://127.0.0.1:31110/v1/chat/completions \
-  -H 'Authorization: Bearer replace-with-a-downstream-key' \
-  -H 'Content-Type: application/json' \
-  -d '{
-    "model": "chatglm",
-    "messages": [{"role": "user", "content": "Read README.md"}],
-    "tools": [{
-      "type": "function",
-      "function": {
-        "name": "read_file",
-        "description": "Read one text file",
-        "parameters": {
-          "type": "object",
-          "properties": {"path": {"type": "string"}},
-          "required": ["path"],
-          "additionalProperties": false
-        }
-      }
-    }]
-  }'
-```
+## API surface and first-hop features
 
-The response uses the normal `choices[0].message.tool_calls` shape. Historical
-assistant calls and `role: tool` results are translated back into text before
-the next upstream turn. `tool_choice` values `auto`, `none`, `required`, and a
-named function are supported.
-
-Streaming requests on every protocol are accepted, but deliberately buffered:
-the relay waits for and validates the complete upstream response before
-emitting downstream SSE chunks. This increases time to first event and prevents
-a partial envelope from becoming executable.
-
-## API surface
-
-- `GET /health`
-- `GET /v1/models`
+- `GET /health`, `GET /v1/models`
 - `POST /v1/chat/completions`
-- `POST /v1/messages`
-- `POST /v1/messages/count_tokens`
-- `POST /v1/responses`
-- `POST /v1/responses/input_tokens`
+- `POST /v1/messages`, `POST /v1/messages/count_tokens`
+- `POST /v1/responses`, `POST /v1/responses/input_tokens`
 
-All three protocols share one conversion engine and one tool allowlist. They
-differ only in how requests and results are mapped to and from the text action
-transport:
-
-| Protocol | Tool definition | Tool request | Tool result history |
-| --- | --- | --- | --- |
-| Chat Completions | `tools[].function.parameters` | `message.tool_calls` | `role: tool` |
-| Messages | `tools[].input_schema` | `content[].tool_use` | `content[].tool_result` |
-| Responses | `tools[].parameters` | `output[].function_call` | `function_call_output` |
-
-`system` and `instructions` are merged into ordinary user context; a system
-role is never sent to the first hop. Anthropic `tool_choice` values `auto`,
-`any`, `none`, and `{type: tool, name}` map onto the same internal choices as
-their Chat Completions equivalents.
-
-The two token-counting endpoints return a local character-based estimate. This
-transport never performs an extra model round trip just to count tokens.
-
-Streaming is accepted on all three protocols but deliberately buffered: the
-relay waits for and validates the complete upstream response before emitting
-events. Anthropic callers receive `message_start`/`content_block_*`/
-`message_delta`/`message_stop`; Responses callers receive
-`response.created`/`response.output_item.*`/`response.completed`.
-
-For a short, operational Claude Code setup, see
-[Claude Code adapter reference](docs/claude-code-adapter-reference.zh-CN.md).
-
-## First-hop capability pass-through
-
-Recent `shanghaitech-genai2api` builds expose image and document attachments, a
-thinking switch, and platform web search. The relay carries those capabilities
-through unchanged:
-
-- Client thinking controls collapse to one boolean `thinking` field; levels are
-  not forwarded as unknown strings.
-- `web_search: true`, `web_search_options`, or a declared `web_search*` tool sets
-  the upstream `web_search` boolean. Search declarations are never treated as
-  locally executable functions.
-- Image blocks (`image_url` / `input_image` / Anthropic `image`) and document
-  blocks (`file` / `input_file` / Anthropic `document`) keep their attachments
-  instead of being flattened into base64 prompt text. Image URLs, including
-  data URLs, are forwarded as-is: current first-hop builds hand them to the
-  platform directly without an upload step, while documents are still uploaded
-  by the first hop.
-- Chain-of-thought is returned where each protocol expects it: Chat
-  `reasoning_content`, Anthropic `thinking` blocks, Responses `reasoning` items.
-
-Details, field mapping, and the Pi Agent validation results are in
-[GenAI2API feature pass-through](docs/genai2api-feature-passthrough.zh-CN.md).
-
-## Protocol-neutral engine
-
-The reusable API lives in `relay.engine`:
-
-```python
-from relay.engine import (
-    RelayRequest,
-    TextActionRelay,
-    TextCompletionRequest,
-    TextMessage,
-    UpstreamReply,
-)
-
-
-class MyBackend:
-    def complete(self, request: TextCompletionRequest) -> UpstreamReply:
-        # Adapt request.messages to any plain-text completion service.
-        return UpstreamReply(content="ordinary model text")
-
-
-relay = TextActionRelay(MyBackend(), retries=1, max_action_bytes=1_048_576)
-result = relay.run(RelayRequest(
-    model="my-model",
-    messages=(TextMessage(role="user", content="hello"),),
-))
-```
-
-`TextCompletionBackend` is a structural protocol: another backend only needs a
-`complete(TextCompletionRequest) -> UpstreamReply` method. Downstream adapters can map
-their native tool definitions to `ToolSpec`, then map `RelayResult.action.calls`
-back to their own response format.
+Token counts are local character-based estimates. Image/document blocks are
+preserved rather than flattened into base64 prompt text. For the website first
+hop, thinking settings map to a boolean `thinking` switch and search declarations
+map to `web_search`; precise effort/budget and native hosted search lifecycles are
+not emulated. These website extensions are not universal provider API features.
+Historical Pi/attachment evidence is in
+[feature pass-through](docs/genai2api-feature-passthrough.zh-CN.md); it is not a
+claim that every attachment combination was revalidated in this refactor.
 
 ## Configuration
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `UPSTREAM_BASE_URL` | `http://127.0.0.1:31100` | First-hop base URL |
-| `UPSTREAM_API_KEY` | unset | Optional first-hop Bearer key |
-| `RELAY_API_KEY` | unset | Optional downstream Bearer or `x-api-key` key |
+| `UPSTREAM_BASE_URL` | `http://127.0.0.1:31100` | Authorized upstream API base |
+| `UPSTREAM_TOOL_MODE` | `native` | `native` or explicit `text` fallback |
+| `UPSTREAM_API_KEY` | unset | Upstream Bearer key |
+| `RELAY_API_KEY` | unset | Downstream Bearer or `x-api-key` |
 | `HOST` | `127.0.0.1` | Listen address |
 | `PORT` | `31110` | Listen port |
-| `UPSTREAM_CONNECT_TIMEOUT` | `10` | Connection timeout in seconds |
-| `UPSTREAM_READ_TIMEOUT` | `1800` | Completion timeout in seconds |
-| `UPSTREAM_ACTION_RETRIES` | `2` | Shared retries after invalid serialization or empty replies; at most 3 attempts total. Length truncation is not retried. |
-| `MAX_ACTION_BYTES` | `1048576` | Maximum buffered response size |
+| `UPSTREAM_CONNECT_TIMEOUT` | `10` | Connect timeout, seconds |
+| `UPSTREAM_READ_TIMEOUT` | `1800` | Socket read timeout, seconds |
+| `UPSTREAM_ACTION_RETRIES` | `2` | Text-mode serialization retries before delivery; native mode ignores it |
+| `MAX_ACTION_BYTES` | `1048576` | Decoded response payload budget; also bounds one incomplete SSE event |
 
-Keep both hops on loopback unless remote access is protected with TLS,
-authentication, and network policy. `.env` is ignored by Git.
+The payload budget counts text, reasoning, tool names, IDs, and arguments while
+reading. Repeated SSE metadata and heartbeats do not consume the payload budget.
+Protect non-loopback deployments with TLS, authentication, and network policy.
 
+## Embedded engine
 
-## Relationship to the upstream project
+`relay.engine.ActionRelay` accepts a backend implementing
+`stream(TextCompletionRequest) -> Iterator[RelayEvent]`. Backend events are
+`text`, `reasoning`, `ping`, and a final `reply`; the engine emits a validated
+`result`. `run()` consumes that same stream for non-streaming callers. Iterators
+must close their upstream resources on cancellation. The old `TextActionRelay`
+complete-only interface has been removed rather than retained as a shim.
 
-This repository is an independent second-hop adapter, not a fork. It consumes
-only the public HTTP interface of `jollyxenon/shanghaitech-genai2api`. The text
-action technique was extracted from a locally validated relay and generalized
-without project paths, accounts, credentials, or deployment-specific logic.
+## Verification and license
 
-Both projects use the MIT License.
+Run `python -m pytest tests -q` in an isolated environment with pytest installed.
+The parent workspace's pixi Python can also run these tests from this directory.
+Existing action-envelope fix notes describe the pre-refactor implementation;
+this README is the current contract.
+
+Both this repository and `shanghaitech-genai2api` use the MIT License.

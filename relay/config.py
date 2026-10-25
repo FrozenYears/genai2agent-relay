@@ -36,11 +36,16 @@ class RelayConfig:
     upstream_read_timeout: float = 1800.0
     upstream_action_retries: int = 2
     max_action_bytes: int = 1_048_576
+    upstream_tool_mode: str = "native"
 
     def __post_init__(self) -> None:
         parsed = urlsplit(self.upstream_base_url)
         if parsed.scheme not in {"http", "https"} or not parsed.netloc:
             raise ValueError("UPSTREAM_BASE_URL must be an absolute HTTP(S) URL")
+        if parsed.query or parsed.fragment:
+            raise ValueError("UPSTREAM_BASE_URL must not contain a query or fragment")
+        if self.upstream_tool_mode not in {"native", "text"}:
+            raise ValueError("UPSTREAM_TOOL_MODE must be native or text")
         if self.port < 1 or self.port > 65535:
             raise ValueError("PORT must be between 1 and 65535")
         if self.max_action_bytes < 1024:
@@ -59,4 +64,5 @@ class RelayConfig:
             upstream_read_timeout=_positive_float("UPSTREAM_READ_TIMEOUT", 1800.0),
             upstream_action_retries=_nonnegative_int("UPSTREAM_ACTION_RETRIES", 2),
             max_action_bytes=_nonnegative_int("MAX_ACTION_BYTES", 1_048_576),
+            upstream_tool_mode=os.environ.get("UPSTREAM_TOOL_MODE", "native").strip().lower(),
         )

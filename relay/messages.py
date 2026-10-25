@@ -3,9 +3,10 @@ from __future__ import annotations
 import base64
 import json
 import uuid
-from typing import Any, Iterable
+from copy import deepcopy
+from typing import Any
 
-from .actions import ToolSpec, encode_calls, encode_result
+from .actions import ToolSpec
 from .content import (
     build_content as merge_content,
     data_url,
@@ -15,12 +16,11 @@ from .content import (
 )
 from .engine import RelayRequest, RelayResult, TextMessage
 from .features import request_options
+from .normalize import (
+    SEARCH_TOOL_TYPES, _unique_tools, history_call_id, normalize_history_call,
+    tool_items, tool_name, tool_schema, tool_strict, validate_choice,
+)
 
-STOP_REASONS = {
-    "tool_calls": "tool_use",
-    "stop": "end_turn",
-    "length": "max_tokens",
-}
 THINKING_SIGNATURE = "genai-compat-no-signature"
 
 
@@ -81,85 +81,116 @@ def _contents(blocks: list[dict[str, Any]]) -> tuple[str, list[dict[str, Any]]]:
 def message_tools(raw_tools: Any) -> list[ToolSpec]:
     result: list[ToolSpec] = []
     names: set[str] = set()
-    for item in raw_tools or []:
-        if not isinstance(item, dict):
-            continue
-        name = str(item.get("name") or "")
-        if not name or name in names:
-            continue
+    for item in tool_items(raw_tools):
+        kind = item.get("type")
+        if kind not in {None, "custom"} and kind not in SEARCH_TOOL_TYPES:
+            raise ValueError(f"Unsupported Messages tool type: {kind!r}")
+        name = tool_name(item.get("name"))
+        if name in names:
+            raise ValueError(f"Duplicate tool name: {name}")
         names.add(name)
-        schema = item.get("input_schema")
+        if kind in SEARCH_TOOL_TYPES:
+            continue
+        if not isinstance(item.get("input_schema"), dict):
+            raise ValueError("Messages tool input_schema must be a JSON Schema object")
         result.append(ToolSpec(
             name=name,
             description=str(item.get("description") or ""),
-            parameters=schema if isinstance(schema, dict) else {"type": "object"},
+            parameters=tool_schema(item.get("input_schema")),
+            strict=tool_strict(item.get("strict")),
         ))
-    return result
+    return _unique_tools(result)
 
 
 def normalize_choice(choice: Any) -> str:
     if choice is None:
         return "auto"
-    if not isinstance(choice, dict):
-        return "auto"
-    kind = choice.get("type")
-    if kind == "any":
-        return "required"
-    if kind in {"auto", "none"}:
-        return kind
-    if kind == "tool":
-        return str(choice.get("name") or "auto")
-    return "auto"
+    if isinstance(choice, dict):
+        kind = choice.get("type")
+        if kind == "any":
+            return "required"
+        if kind in {"auto", "none"}:
+            return kind
+        if kind == "tool":
+            return tool_name(choice.get("name"))
+    raise ValueError("Unsupported Messages tool_choice")
 
 
 def prepare_messages(body: dict[str, Any], tools: list[ToolSpec], choice: str) -> RelayRequest:
+    choice = validate_choice(choice, tools, body)
     instructions = "\n\n".join(_string_list(body.get("system")))
     messages: list[TextMessage] = []
+    seen_ids: set[str] = set()
     for message in body.get("messages") or []:
         if not isinstance(message, dict):
-            continue
-        role = "assistant" if message.get("role") == "assistant" else "user"
-        blocks = _blocks(message.get("content"))
-        text, attachments = _contents(blocks)
-        calls: list[dict[str, Any]] = []
-        results: list[tuple[str, list[dict[str, Any]], str, bool]] = []
-        for block in blocks:
-            kind = block.get("type")
-            if kind == "tool_use":
-                parameters = block.get("input")
-                calls.append({
-                    "operation": str(block.get("name") or ""),
-                    "parameters": parameters if isinstance(parameters, dict) else {},
-                })
-            elif kind == "tool_result":
-                result_text, result_attachments = _contents(_blocks(block.get("content")))
-                results.append((
-                    str(block.get("tool_use_id") or "unknown"),
-                    result_attachments,
-                    result_text,
-                    bool(block.get("is_error")),
-                ))
-        if calls:
-            text = "\n".join(part for part in (text, encode_calls(calls)) if part)
-        if results:
-            if text or attachments:
-                messages.append(TextMessage(role=role, content=merge_content([text], attachments)))
-            for call_id, result_attachments, result_text, is_error in results:
-                envelope = encode_result(call_id, result_text, is_error)
-                messages.append(TextMessage(
-                    role="user",
-                    content=merge_content([envelope], result_attachments),
-                ))
-            continue
-        messages.append(TextMessage(role=role, content=merge_content([text], attachments)))
+            raise ValueError("messages must contain objects")
+        role = message.get("role", "user")
+        if role not in {"assistant", "user"}:
+            raise ValueError(f"Unsupported Messages role: {role!r}")
+        pending: list[dict[str, Any]] = []
 
+        def flush() -> None:
+            if not pending:
+                return
+            text, attachments = _contents(pending)
+            calls: list[dict[str, Any]] = []
+            thinking: list[dict[str, Any]] = []
+            for block in pending:
+                kind = block.get("type")
+                if kind == "tool_use":
+                    if role != "assistant":
+                        raise ValueError("Only assistant messages may contain tool_use")
+                    if not isinstance(block.get("input"), dict):
+                        raise ValueError("tool_use.input must be an object")
+                    calls.append(normalize_history_call({
+                        "id": block.get("id"),
+                        "type": "function",
+                        "function": {
+                            "name": tool_name(block.get("name")),
+                            "arguments": json.dumps(block["input"], ensure_ascii=False, separators=(",", ":")),
+                        },
+                    }, seen_ids))
+                elif kind in {"thinking", "redacted_thinking"}:
+                    thinking.append(deepcopy(block))
+                elif kind not in {"text", "image", "document"}:
+                    raise ValueError(f"Unsupported Messages content block: {kind!r}")
+            messages.append(TextMessage(
+                role=role,
+                content=merge_content([text], attachments),
+                tool_calls=tuple(calls),
+                reasoning_content="\n".join(str(block.get("thinking") or "") for block in thinking if block.get("type") == "thinking"),
+                extra={"thinking_blocks": thinking} if thinking else {},
+            ))
+            pending.clear()
+
+        for block in _blocks(message.get("content")):
+            if block.get("type") != "tool_result":
+                pending.append(block)
+                continue
+            flush()
+            result_text, result_attachments = _contents(_blocks(block.get("content")))
+            messages.append(TextMessage(
+                role="tool",
+                tool_call_id=history_call_id(block.get("tool_use_id")),
+                content=merge_content([result_text], result_attachments),
+                extra={"is_error": bool(block.get("is_error", False))},
+            ))
+        flush()
+
+    raw_choice = body.get("tool_choice") or {}
+    disable_parallel = raw_choice.get("disable_parallel_tool_use", False)
+    if not isinstance(disable_parallel, bool):
+        raise ValueError("disable_parallel_tool_use must be a boolean")
     sampling = {key: body[key] for key in ("temperature", "top_p") if key in body}
+    if "stop_sequences" in body:
+        sampling["stop"] = body["stop_sequences"]
     return RelayRequest(
         model=str(body.get("model") or "chatglm"),
         messages=tuple(messages),
         instructions=instructions,
         tools=tuple(tools),
         tool_choice=choice,
+        parallel_tool_calls=not disable_parallel,
         max_tokens=int(body.get("max_tokens") or 8192),
         sampling=sampling,
         upstream_options=request_options(body, body.get("tools"), "anthropic"),
@@ -178,7 +209,7 @@ def build_content(result: RelayResult) -> list[dict[str, Any]]:
     if decoded.text:
         blocks.append({"type": "text", "text": decoded.text})
     blocks.extend(
-        {"type": "tool_use", "id": "toolu_" + uuid.uuid4().hex[:24], "name": call.name, "input": call.parameters}
+        {"type": "tool_use", "id": call.id, "name": call.name.removeprefix(call.namespace + ".") if call.namespace else call.name, "input": call.parameters}
         for call in decoded.calls
     )
     return blocks
@@ -202,65 +233,10 @@ def build_response(body: dict[str, Any], result: RelayResult) -> dict[str, Any]:
     }
 
 
-def stream_events(body: dict[str, Any], result: RelayResult) -> Iterable[str]:
-    response = build_response(body, result)
-    usage = response["usage"]
-    start_usage = {"input_tokens": usage["input_tokens"], "output_tokens": 0}
-
-    def emit(event: str, data: dict[str, Any]) -> str:
-        return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
-
-    yield emit("message_start", {
-        "type": "message_start",
-        "message": {**response, "content": [], "stop_reason": None, "stop_sequence": None, "usage": start_usage},
-    })
-    yield emit("ping", {"type": "ping"})
-    for index, block in enumerate(response["content"]):
-        if block["type"] == "thinking":
-            yield emit("content_block_start", {
-                "type": "content_block_start", "index": index,
-                "content_block": {"type": "thinking", "thinking": "", "signature": ""},
-            })
-            yield emit("content_block_delta", {
-                "type": "content_block_delta", "index": index,
-                "delta": {"type": "thinking_delta", "thinking": block["thinking"]},
-            })
-            yield emit("content_block_delta", {
-                "type": "content_block_delta", "index": index,
-                "delta": {"type": "signature_delta", "signature": block["signature"]},
-            })
-        elif block["type"] == "text":
-            yield emit("content_block_start", {
-                "type": "content_block_start", "index": index,
-                "content_block": {"type": "text", "text": ""},
-            })
-            yield emit("content_block_delta", {
-                "type": "content_block_delta", "index": index,
-                "delta": {"type": "text_delta", "text": block["text"]},
-            })
-        else:
-            yield emit("content_block_start", {
-                "type": "content_block_start", "index": index,
-                "content_block": {"type": "tool_use", "id": block["id"], "name": block["name"], "input": {}},
-            })
-            yield emit("content_block_delta", {
-                "type": "content_block_delta", "index": index,
-                "delta": {
-                    "type": "input_json_delta",
-                    "partial_json": json.dumps(block["input"], ensure_ascii=False, separators=(",", ":")),
-                },
-            })
-        yield emit("content_block_stop", {"type": "content_block_stop", "index": index})
-    yield emit("message_delta", {
-        "type": "message_delta",
-        "delta": {"stop_reason": response["stop_reason"], "stop_sequence": None},
-        "usage": {"output_tokens": usage["output_tokens"]},
-    })
-    yield emit("message_stop", {"type": "message_stop"})
 
 
 def estimate_tokens(body: dict[str, Any], tools: list[ToolSpec]) -> int:
-    """Rough character-based estimate. This transport never calls the model to count."""
+    """按字符数粗估 token，不为计数调用模型。"""
     total = len("\n".join(_string_list(body.get("system"))))
     for message in body.get("messages") or []:
         if not isinstance(message, dict):
