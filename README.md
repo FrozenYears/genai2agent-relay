@@ -1,89 +1,49 @@
 # GenAI2AgentRelay
 
-面向 OpenAI Chat Completions、Anthropic Messages 与 OpenAI Responses 的 native-first 流式网关。它通过结构化 Chat 请求与 SSE 连接本地第一跳，再将响应转换为客户端所需协议。工具由下游 Agent 自行执行，relay 不会执行命令，也不会读取工具参数中指定的文件。
+双跳反代的第二跳：向客户端提供 Chat Completions、Messages 和 Responses 接口，与第一跳交换结构化工具和 SSE。
 
-当前实现使用 `feat/native-first-streaming` 分支，不要使用 `main`。两处仓库需要配套升级：
+[启动](#快速开始) · [接入地址](#客户端接入) · [工作原理](#工具调用如何处理) · [详细配置](docs/CONFIGURATION.md)
 
-```text
-Client (executes tools)
-  → GenAI2AgentRelay, 127.0.0.1:31110
-  → shanghaitech-genai2api, 31100
-  → University GenAI website
-```
+> [!NOTE]
+> 使用 `feat/native-first-streaming` 分支，先按[第一跳 README](https://github.com/FrozenYears/shanghaitech-genai2api/blob/feat/native-first-streaming/README.md)启动 31100 服务。
+> 学校网页登录、附件处理与工具适配均由第一跳负责。
 
-第一跳负责网页登录、附件处理、网页提示词注入以及严格的工具解析。relay 负责协议转换、增量交付、整批校验与错误透传。这里的 `native` 指两跳之间采用结构化工具传输，并不代表学校网页上游支持标准原生函数调用；解析 Kimi 或 DeepSeek 的输出语法同样不代表具备该能力。
+## 快速开始
 
-当前部署只走学校网页，不提供学校独立 API Key 或绕过网页第一跳的接入方案。完整部署见[第一跳 README](https://github.com/FrozenYears/shanghaitech-genai2api/blob/feat/native-first-streaming/README.md)，职责、源码对照与历史验收见[双跳架构说明](https://github.com/FrozenYears/shanghaitech-genai2api/blob/feat/native-first-streaming/docs/STAGE_NATIVE_FIRST.md)。
-
-## 安装与运行
-
-环境要求：Python 3.10 或更高版本、Git、uv。以下命令将依赖安装到本仓库的 `.venv`，不修改系统 Python。环境用法见 [uv 文档](https://docs.astral.sh/uv/pip/environments/)。
-
-先按第一跳 README 启动当前分支的第一跳，再启动 relay。第一跳当前绑定 `0.0.0.0:31100`，不能视为只对本机开放；请设置第一跳本地 API Key，并用防火墙限制到受信网络。下面的 relay 仍绑定 `127.0.0.1`。这些开发启动命令不构成面向公网的生产 WSGI 部署保证。
-
-### WSL / Linux
-
-将独立仓库克隆至 Linux 文件系统：
+需 Git、uv 及 Python 3.10+；依赖仅安装到本仓库 `.venv`。
 
 ```bash
 git clone --branch feat/native-first-streaming https://github.com/FrozenYears/genai2agent-relay.git
 cd genai2agent-relay
 uv venv .venv
+```
+
+Linux / WSL 安装：
+
+```bash
 uv pip install --python .venv/bin/python -e .
 cp .env.example .env
 ```
 
-编辑 `.env` 后，在当前目录下启动：
-
-```bash
-.venv/bin/genai2agent-relay
-# 等价入口：.venv/bin/python main.py
-```
-
-### Windows PowerShell
+<details>
+<summary>Windows PowerShell 安装</summary>
 
 ```powershell
-git clone --branch feat/native-first-streaming https://github.com/FrozenYears/genai2agent-relay.git
-Set-Location genai2agent-relay
-uv venv .venv
-uv pip install --python .venv\Scripts\python.exe -e .
+uv pip install --python .venv/Scripts/python.exe -e .
 Copy-Item .env.example .env
 ```
 
-编辑 `.env` 后直接启动，无需激活虚拟环境或修改执行策略：
+WSL 与 Windows 环境独立，不共用 `.venv`；跨环境回环地址互通需自行确认。
 
-```powershell
-.\.venv\Scripts\genai2agent-relay.exe
-# 等价入口：.\.venv\Scripts\python.exe main.py
-```
+</details>
 
-如果在父工作区中操作，先进入其 `genai2agent-relay` 子目录。Windows 的 `D:\shanghaitech-genai2api\genai2agent-relay` 在 WSL 中通常对应 `/mnt/d/shanghaitech-genai2api/genai2agent-relay`；WSL 与 Windows 的 `.venv/bin`、`.venv\Scripts` 不可混用，建议分开检出并各建环境。示例假设两跳能通过同一环境的 `127.0.0.1` 互访；不要直接把跨 WSL/Windows 的回环互通当作保证。
-
-## 鉴权与 `.env`
-
-注意区分三层不同的凭据边界：
-
-| 凭据 | 配置项 | 用途 |
-| --- | --- | --- |
-| 学校统一身份认证账号密码或网页 JWT | 第一跳 `GENAI_TOKEN` | 第一跳管理网页登录凭据；绝不能用作 relay 客户端凭据 |
-| 第一跳本地代理 Key | 第一跳 `API_KEY`；relay `UPSTREAM_API_KEY` | relay 访问第一跳的本地鉴权；两处配置必须完全一致 |
-| relay 本地 Key | relay `RELAY_API_KEY`；客户端 API Key | 客户端访问 relay 的本地鉴权；建议与第一跳 Key 设为不同值 |
-
-第一跳仓库的 `.env` 配置示例：
-
-```dotenv
-GENAI_TOKEN=student_id@password
-API_KEY=replace-with-first-hop-local-key
-PORT=31100
-```
-
-本仓库 relay 的 `.env` 配置：
+编辑本仓库 `.env`：
 
 ```dotenv
 UPSTREAM_BASE_URL=http://127.0.0.1:31100
 UPSTREAM_TOOL_MODE=native
-UPSTREAM_API_KEY=replace-with-first-hop-local-key
-RELAY_API_KEY=replace-with-relay-local-key
+UPSTREAM_API_KEY=replace-with-first-hop-key
+RELAY_API_KEY=replace-with-relay-key
 HOST=127.0.0.1
 PORT=31110
 UPSTREAM_CONNECT_TIMEOUT=10
@@ -92,171 +52,83 @@ UPSTREAM_ACTION_RETRIES=2
 MAX_ACTION_BYTES=1048576
 ```
 
-将示例值替换为实际值，切勿提交 `.env`。这里的两处本地 Key 均非学校官方 API Key。relay 接受 `Authorization: Bearer <RELAY_API_KEY>` 或 `x-api-key: <RELAY_API_KEY>`。若未配置 `RELAY_API_KEY`，下游请求将不受鉴权保护；`/health` 始终免鉴权。不要向无关服务发送学校账号凭据或本地 Key。非本机回环部署需额外配置 TLS、访问控制和网络防火墙。
-
-## 客户端地址与调用示例
-
-| 客户端协议 | API Base | 请求端点 |
-| --- | --- | --- |
-| OpenAI Chat Completions | `http://127.0.0.1:31110/v1` | `POST /v1/chat/completions` |
-| OpenAI Responses | `http://127.0.0.1:31110/v1` | `POST /v1/responses` |
-| Anthropic Messages | `http://127.0.0.1:31110` | `POST /v1/messages` |
-
-客户端 API Key 请填入 `RELAY_API_KEY`，不要填写学校账号凭据或第一跳 Key。Claude Code 的配置方式见 [adapter reference](docs/claude-code-adapter-reference.zh-CN.md)。
-
-可在 Linux / WSL 的 `curl` 或 Windows PowerShell 的 `curl.exe` 中运行以下单行命令：
-
-```bash
-curl http://127.0.0.1:31110/health
-curl -H "Authorization: Bearer replace-with-relay-local-key" http://127.0.0.1:31110/v1/models
-```
-
-`/health` 仅返回 relay 运行状态和当前配置的上游地址，不会测试学校登录状态或实际模型生成。`/v1/models` 会拉取第一跳的模型列表。从返回列表中选取实际模型 ID，在 Linux / WSL 中发起最小流式请求验证：
-
-```bash
-curl -N http://127.0.0.1:31110/v1/chat/completions \
-  -H 'Content-Type: application/json' \
-  -H 'Authorization: Bearer replace-with-relay-local-key' \
-  -d '{"model":"MODEL_ID_FROM_MODELS","messages":[{"role":"user","content":"你好"}],"stream":true}'
-```
-
-将其中的 `MODEL_ID_FROM_MODELS` 替换为实际 ID。此外网关还提供 `POST /v1/messages/count_tokens` 与 `POST /v1/responses/input_tokens` 计数端点。Token 统计为本地基于字符数的估算值，并非模型提供方分词器的精确计数。
-
-## 传输模式
-
-### 默认 `native` 模式
-
-只要底层 Chat 协议支持表达，relay 会完整保留 system/developer 角色、工具定义、tool_choice、并行约束、assistant 调用记录、调用 ID 及工具执行结果。第一跳返回的 SSE 流会被即时消费。native 工具调用仅在上游正常结束且通过完整批次校验后交付。native 调用失败不会触发 relay 端的生成重试、文本模式降级或模型切换。
-
-### 显式 `text` 模式
-
-仅在对接纯文本后端时配置 `UPSTREAM_TOOL_MODE=text`。学校当前部署依然使用本地第一跳及默认 native 模式。文本模式会将工具定义与历史记录编码在普通对话文本中；system/developer 指令会被转为上下文，当前工具 Schema 会置于最新用户轮次附近。历史调用保留 ID，工具结果通过 ID 关联，支持乱序结果。用户与结果中的控制标记会进行可逆转义，不会篡改附件或历史调用信封。
-
-新的可执行调用必须是单个完整的最终信封：
-
-```text
-@@ACTION@@{"calls":[{"operation":"read_file","parameters":{"path":"README.md"}}]}@@END_ACTION@@
-```
-
-单次调用可附带唯一字符串 `id`；若未提供，relay 会自动分配。正文引用的示例、思考过程以及代码块包裹的 JSON 不会被重试成工具调用。系统不提供定界符容错修复、参数名推断更正、类型猜测，也不会从损坏输出中挑选最后一段有效信封。
-
-`UPSTREAM_ACTION_RETRIES` 默认允许额外重试 2 次。该重试仅在尚未交付任何正文或思考、且上游输出了以 action 标记开头的损坏信封时生效。完全空回复、流中断、输出截断、普通对话示例及客户端工具执行均不在此重试预算内。
-
-## 流式交付、批次校验与错误处理
-
-三种客户端协议均会在模型生成完成前发送首包开启事件。正文与思考内容增量实时到达。工具参数会持续缓冲，直至上游正常生成结束并通过整批校验；分块的参数碎片绝不会作为可执行调用交付。Responses 协议事件具备单调递增的 `sequence_number` 与稳定的生命周期 ID。
-
-上游发出的心跳在 Chat/Responses 协议中体现为 SSE 注释，在 Messages 协议中体现为 `ping` 事件。relay 不维护独立的心跳定时任务；心跳由配套的第一跳在等待后端响应时发出。
-
-校验逻辑强制执行以下规则：
-
-- 每一项调用必须命中当前允许调用的工具，且符合其 JSON Schema。Schema 仅支持本地引用，不支持拉取远程 Schema。
-- 严格执行 `none`、`required`、指定工具选择以及 `parallel_tool_calls=false`。Messages 协议的 `disable_parallel_tool_use` 会映射为相同约束。
-- 批次中任何一项调用校验不通过，整批调用全部拒绝。不会剔除未知工具后再交付其余合法调用。
-- 存在重复 JSON 键、非有限数字、重复 ID、多个 action 信封、不完整 SSE/JSON 以及截断输出均会被直接拒绝。
-- OpenAI 函数定义中若缺少 `parameters`，视为无参函数；显式传 `{}` 仍保留为开放 Schema。Anthropic 工具定义必须包含 `input_schema`。
-
-响应头发送后发生的故障会以协议对应的错误事件返回，不发送表示成功的终止事件。非流式请求的上游或解析故障返回 HTTP 502。第一跳中安全的 `message`、`type` 与 `code` 字段会被截断限长并脱敏凭据后透传；请求头、调用栈及原始错误响应体不会透传。
-
-`MAX_ACTION_BYTES` 默认值为 `1048576`。流式读取过程中，它统计正文、思考、工具名、ID 及参数累计占用的 UTF-8 字节数。单条不完整的 SSE 事件同样受该上限约束。重复的 SSE 元数据与心跳不占用此累计载荷配额。该配置用于限制整个响应的消费体量，不仅限于工具参数大小。
-
-客户端中断流式连接会同步断开上游 HTTP 响应。若在响应头返回前连接挂起，其等待时长受网络超时限制；无法保证立即中止远端大模型的后台推理。整批校验不是文件权限审查，也不是 OS 沙箱，无法证明写入的文件内容符合预期。客户端必须自行对工具进行权限控制，重要写入操作应通过执行、回读或哈希校验等方式确认。
-
-## 配置项
-
-| 环境变量 | 默认值 | 用途 |
-| --- | --- | --- |
-| `UPSTREAM_TOOL_MODE` | `native` | `native` 或显式 `text`；不会自动降级 |
-| `UPSTREAM_BASE_URL` | `http://127.0.0.1:31100` | 当前部署对应的本地第一跳地址 |
-| `UPSTREAM_API_KEY` | 未设置 | 第一跳本地 Bearer Key；必须与第一跳 `API_KEY` 一致 |
-| `RELAY_API_KEY` | 未设置 | 下游访问 relay 的 Bearer / `x-api-key` |
-| `HOST` | `127.0.0.1` | relay 监听地址；不影响第一跳配置 |
-| `PORT` | `31110` | relay 监听端口 |
-| `UPSTREAM_CONNECT_TIMEOUT` | `10` | relay 连接第一跳的超时时间（秒） |
-| `UPSTREAM_READ_TIMEOUT` | `1800` | 上游 socket 两次数据读取间的等待超时（秒）；不是单次任务总耗时上限 |
-| `UPSTREAM_ACTION_RETRIES` | `2` | 文本模式下交付前对损坏信封的额外纠错次数；native 模式下忽略 |
-| `MAX_ACTION_BYTES` | `1048576` | 累计载荷及单条未完整 SSE 事件的字节上限；最小值为 `1024` |
-
-### 第一跳的 8 / 3 / 900 恢复预算
-
-以下配置属于**第一跳仓库**的 `.env` 或启动参数，不是 relay 环境变量：
-
-| 第一跳环境变量 | 第一跳 CLI 参数 | 默认值与约束 |
-| --- | --- | --- |
-| `GENAI_EMPTY_CONTINUATIONS` | `--empty-continuations` | 完全空完成额外继续 `8` 次，整数 `0..30` |
-| `GENAI_TOOL_REPAIR_ATTEMPTS` | `--tool-repair-attempts` | 未交付坏工具批次额外纠错 `3` 次，整数 `0..10` |
-| `GENAI_TOOL_REQUEST_TIMEOUT_SECONDS` | `--tool-request-timeout` | 所有生成共享 `900` 秒，有限正数，不含附件预处理 |
-
-完全空完成要求原始正文、思考、调用均为空且正常 `stop`。坏工具纠错要求正常结束后发现明确的协议、JSON、Schema 或工具选择错误，且没有正文、思考或批次交付。纠错由模型重新生成，不靠猜参数或修字符串。
-
-两类次数累计、不相互重置，默认每请求最多 `1+8+3=12` 次生成。900 秒窗口不因心跳或新一代续期。恢复保留完整原历史与工具约束，只补真实次数和安全错误反馈，不积累虚构结果、不切模型、不降级、不重放客户端操作。已交付正文或思考、网络错误、断流、截断、取消或到期不重放；普通非空计划不会被猜成未完成。普通无工具请求不使用这些恢复或工具 deadline。
-
-空预算耗尽为 `upstream_empty_response`，纠错耗尽保留具体错误码并说明耗尽，deadline 为 `upstream_request_timeout`。失败没有成功终态，未校验调用不交付。第一跳关闭已取得的 socket；尚未取得响应头时，主响应可按窗口失败，worker 等底层请求返回后清理，不能保证即时取消远端生成。
-
-第一跳单次网络 connect/read timeout 为 10/300 秒。relay 的 10/1800 秒约束的是 relay 到第一跳的网络等待；它们和共享生成窗口、agent 整场任务预算不同。调大 read timeout 不会延长第一跳的共享窗口。
-
-### 可选的外部任务监督
-
-第一跳仓库提供可选 [OMP 监督器 `supervise.py`](https://github.com/FrozenYears/shanghaitech-genai2api/blob/feat/native-first-streaming/validation/native-first-endurance/supervise.py)。它在同一真实 OMP 会话中，每轮结束后运行操作者指定的独立验收，对失败或停滞反馈继续；默认额外 8 次反馈、整场 45 分钟，单次 RPC 等待 1200 秒。
-
-监督器不会自动安装或接管所有客户端。整场预算耗尽、权限/身份故障或无法确认会话停稳时，会保存状态并以非零状态退出；没有跨进程自动恢复，也不是 OS 沙箱。它可以在限定预算内减少人工逐次反馈，不能保证无人值守无限成功。配置与使用条件见[第一跳 README](https://github.com/FrozenYears/shanghaitech-genai2api/blob/feat/native-first-streaming/README.md)。
-
-## 兼容性与未支持特性
-
-- 支持函数工具、自定义文本工具以及 Responses 的命名空间。命名空间在内部拼接为 `namespace.leaf` 处理，对外拆分为 `namespace` 和 `name` 两个字段返回。自定义文本工具通过 `{"input": string}` 参数定义的上游函数外壳进行包装。
-- 暂未实现 Custom grammar，调用将返回 HTTP 400。需要 grammar 工具的客户端（如 Codex）必须使用兼容的工具声明，或使用支持该特性的服务提供方。
-- 不提供 Responses 服务端状态维护功能：不支持 `previous_response_id`、`item_reference` 与 `store=true`，此类请求会被拒绝。每次请求必须发送完整的上下文历史。
-- 附件会直接透传至第一跳。图片和文档数据块会原样保留，不会被降级压平为 base64 文本。项目不提供 Files API（`/v1/files`）、附件缓存或持久化的 `file_id` 存储。
-- 网页端思考开关会映射为布尔值 `thinking`，联网搜索声明会映射为 `web_search`。不支持精确调节思考预算或模拟完整的服务方联网搜索流程。这些网页适配不构成服务方官方 API 行为的全面保证。
-- 原生历史记录仅保留 Chat 传输格式能表达的思考元数据。不同提供方之间的加密思考数据无法通用互换。Messages 输出使用 `genai-compat-no-signature`，而非真实的 Anthropic 签名；Responses 输出不会重构加密的思考状态。
-
-附件、Pi 与透传的历史验证见[功能透传说明](docs/genai2api-feature-passthrough.zh-CN.md)，不代表本次重构重新验证了所有附件组合。
-
-## 重构前实现与迁移说明
-
-此处为静态源码设计的对比，并非同等负载下的性能或成功率对比。
-
-| 模块 | 原作者 `main@dbb8f65` | 重构前本地 `5d3bd12` | 当前 `feat/native-first-streaming` |
-| --- | --- | --- | --- |
-| 既有 API 与校验 | 已支持三种协议，具备 Schema/白名单校验及尺寸限制，支持附件/思考/搜索透传 | 继承上述功能，补充了文本路径的诊断与问题修复 | 继承既有 API，强化严格解析与生命周期处理；这些能力并非全属新增 |
-| 上游传输方式 | `TextActionRelay` → `backend.complete()`，强制非流式，显式拒绝原生 `tool_calls` | 仍沿用 `run → complete()` 文本路径 | `ActionRelay.stream()` → `backend.stream()`，默认结构化 native；非流式客户端复用相同的内部流 |
-| 下游 SSE 输出 | 必须等待上游完整回复生成后才开始缓冲输出 | 仍受限于非流式路径 | 提前发送开启事件，正文、思考与心跳增量交付；工具调用仍需等待整批校验 |
-| 上下文历史与纠错 | 文本信封格式，在 relay 端进行修正 | 已包含引号/标记保护以及工具返回结果提示词的修复 | 采用 native 角色与调用关联；第一跳支持 8/3/900 恢复，取消 relay 端叠加重试；文本模式需显式指定 |
-| 安全边界与状态 | 已有调用校验和代理认证；本地工具授权由客户端负责，没有服务端会话存储 | 文本路径修复未引入 native 传输或 OS 沙箱 | 严格拒绝非法批次及未支持的状态字段；客户端依旧独立执行并授权工具 |
-
-源码基线：[原作者 `dbb8f65841345704b84c5dd368190277dcdd5737`](https://github.com/negativegluon/genai2agent-relay/tree/dbb8f65841345704b84c5dd368190277dcdd5737)、[本地重构前 `5d3bd12855269e9b6e901dc87465f5ca11f96157`](https://github.com/FrozenYears/genai2agent-relay/tree/5d3bd12855269e9b6e901dc87465f5ca11f96157)。两跳完整差异见[架构对照](https://github.com/FrozenYears/shanghaitech-genai2api/blob/feat/native-first-streaming/docs/STAGE_NATIVE_FIRST.md)。
-
-自定义后端须迁移至 `stream(TextCompletionRequest) -> Iterator[RelayEvent]` 接口。后端生成的事件包括 `text`、`reasoning`、`ping` 和终止的 `reply`；引擎对外统一产出经过校验的 `result`。`run()` 同样复用该流式接口。取消请求时迭代器必须妥善释放上游资源。旧版 `TextActionRelay` 及非流式接口已直接删除，未保留向后兼容垫片。纯文本后端必须显式开启文本模式。
-
-## 独立测试与相关文档
-
-在本仓库现有的隔离环境中安装 pytest 并运行测试：
-
-```bash
-# Linux / WSL
-uv pip install --python .venv/bin/python pytest
-.venv/bin/python -m pytest tests -q
-```
-
-```powershell
-# Windows PowerShell
-uv pip install --python .venv\Scripts\python.exe pytest
-.\.venv\Scripts\python.exe -m pytest tests -q
-```
-
-两款模型均完成了记录中的 20 阶段实际任务。这是完整双跳链路配合 omp 监督器及独立验收的结果，不是 relay 单独的成功率，也不保证任意任务都能完成。模型表现、运行材料和测试范围见[实测报告](https://github.com/FrozenYears/shanghaitech-genai2api/blob/feat/native-first-streaming/docs/TEST_REPORT_deepseek_pro.md)。
-
-以上仅为测试执行说明，并不表示本次文档修改重新运行了上述测试。单元测试不能替代对学校网页上游真实调用、真实客户端联调或独立任务的验收检查。
-
-| 文档 | 内容说明 |
+| 配置 | 要求 |
 | --- | --- |
-| [Claude Code 适配指南](docs/claude-code-adapter-reference.zh-CN.md) | 客户端配置说明与适配层限制 |
-| [第一跳功能透传说明](docs/genai2api-feature-passthrough.zh-CN.md) | 附件、思考模式、联网搜索与历史实测记录 |
-| [Action 信封修复说明](docs/action-envelope-fixes.zh-CN.md) | 重构前的历史修改记录；不覆盖当前的接口约定 |
-| [GitHub Token 发布配置](docs/github-token-publish.zh-CN.md) | 仓库发布流程参考 |
-| [第一跳 README](https://github.com/FrozenYears/shanghaitech-genai2api/blob/feat/native-first-streaming/README.md) | 网页登录、第一跳服务部署及可选的监督器说明 |
-| [第一跳文档索引](https://github.com/FrozenYears/shanghaitech-genai2api/blob/feat/native-first-streaming/docs/README.md) | 架构设计、支持功能与归档的实测验收记录 |
+| `UPSTREAM_API_KEY` | 与第一跳 `API_KEY` 相同，不是学校网页令牌 |
+| `RELAY_API_KEY` | 客户端本地 Key；未设时不鉴权 |
+| `UPSTREAM_ACTION_RETRIES` | 仅 text 模式生效；native 不叠加重试 |
+| `MAX_ACTION_BYTES` | 正文、思考、工具载荷及未闭合 SSE 事件的字节上限 |
 
-## 许可证
+启动并保持第一跳同时运行：
 
-本项目与 `shanghaitech-genai2api` 均使用 MIT License 开源。
+```bash
+.venv/bin/python main.py
+```
+
+Windows 使用 `.venv/Scripts/python.exe main.py`。
+
+> [!WARNING]
+> relay 默认仅监听 `127.0.0.1`，但第一跳当前监听 `0.0.0.0`。
+> 请设置两处本地 Key 并限制网络访问，切勿提交 `.env` 或直接暴露到公网。
+
+## 客户端接入
+
+客户端 Key 使用 `RELAY_API_KEY`，支持 Bearer 或 `x-api-key`。
+
+| 协议 | Base URL | 请求路径 |
+| --- | --- | --- |
+| Chat Completions | `http://127.0.0.1:31110/v1` | `/chat/completions` |
+| Responses | `http://127.0.0.1:31110/v1` | `/responses` |
+| Messages | `http://127.0.0.1:31110` | `/v1/messages` |
+
+```bash
+curl -fsS http://127.0.0.1:31110/health
+curl -fsS http://127.0.0.1:31110/v1/models \
+  -H 'Authorization: Bearer replace-with-relay-key'
+```
+
+- `/health` 免鉴权，只说明服务可达，不验证学校登录或模型生成。
+- 模型名称使用 `/v1/models` 返回的 `id`。
+- Claude Code 配置见[适配指南](docs/claude-code-adapter-reference.zh-CN.md)。
+
+## 工具调用如何处理
+
+1. relay 保留客户端工具 Schema、角色、调用 ID 及历史结果，转发给第一跳。
+2. 网页无原生工具通道时，第一跳将工具规则写入提示，并解析模型输出的调用文本。
+3. 第一跳与 relay 校验完整批次，通过后按客户端协议交付。
+4. 本地 agent 执行工具并回传结果；relay 不执行命令、不读取参数指定文件。
+
+[网页模型的工具调用示例](https://github.com/FrozenYears/shanghaitech-genai2api/blob/feat/native-first-streaming/README.md#网页模型如何调用工具)
+
+| 模式 | 用途 | 生成重试 |
+| --- | --- | --- |
+| `native`（默认） | 两跳间传结构化工具与 SSE | relay 不重试；由第一跳恢复 |
+| `text`（显式） | 仅支持文本的 backend | 未交付内容的坏封套，默认额外 2 次 |
+
+- 正文/思考增量返回；工具参数收齐并整批校验后交付，不剔除坏项做部分执行。
+- 第一跳默认空继续 8 次、工具纠错 3 次，共享 900 秒请求窗口；在第一跳配置。
+- 已交付内容、断流、截断和网络错误不重放；失败不发成功终态。
+
+> [!IMPORTANT]
+> `native` 不代表学校网页开放了原生函数输入。
+> 无 Files API、Responses 服务端状态或 custom grammar；工具授权由客户端负责，代理不是 OS 沙箱。
+
+## 与重构前的区别
+
+| 项目 | 原版 | 当前 |
+| --- | --- | --- |
+| 上游 | `complete()` 等完整文本，拒绝原生调用 | 默认 `stream()`，接受结构化调用 |
+| 下游 SSE | 完整文本校验后才输出 | 开始事件先发，正文/思考增量返回 |
+| 校验与恢复 | 已有 Schema 校验，文本纠错在 relay | 严格整批交付，native 请求恢复集中第一跳 |
+
+完整基线与兼容代价见[架构对照](https://github.com/FrozenYears/shanghaitech-genai2api/blob/feat/native-first-streaming/docs/STAGE_NATIVE_FIRST.md#5-与双跳原仓库及本地重构前分支的对照)。自定义 backend 需迁移到 `stream()`，详见[配置说明](docs/CONFIGURATION.md#自定义后端)。
+
+## 实测与文档
+
+- 已记录的完整双跳 + omp 监督器测试中，DeepSeek、Kimi 均完成 20 阶段，最终 71 项验收通过；Kimi 用到 4 次自动反馈。
+- 这不是 relay 单独的成功率或任意任务保证。[实测报告](https://github.com/FrozenYears/shanghaitech-genai2api/blob/feat/native-first-streaming/docs/TEST_REPORT_deepseek_pro.md)
+- [完整配置与限制](docs/CONFIGURATION.md) · [附件与思考透传](docs/genai2api-feature-passthrough.zh-CN.md) · [历史修复](docs/action-envelope-fixes.zh-CN.md)
+
+独立测试：在现有虚拟环境安装 pytest 后运行 `.venv/bin/python -m pytest tests -q`；Windows 替换解释器路径。部署检查不能只看单元测试。
+
+基于 [negativegluon/genai2agent-relay](https://github.com/negativegluon/genai2agent-relay)，采用 [MIT License](LICENSE)。
