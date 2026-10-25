@@ -57,10 +57,20 @@ completion. Non-streaming failures return HTTP 502. Closing a consumed stream
 closes the upstream HTTP response. A blocked connection before response headers
 is still bounded by the configured timeouts, not guaranteed to cancel instantly.
 
-Native mode never retries model generation. Text mode may retry a clearly
-attempted malformed action envelope only while no text/reasoning has been
-delivered. Truncation, ordinary examples, empty answers, and already delivered
-content are not silently replayed. The retry budget does not cover executing tools.
+The relay itself never retries model generation in native mode. Its paired first
+hop permits one continuation only for a tool-enabled request that finished with
+zero text, zero reasoning, zero calls, and a normal `stop`. It preserves history
+and asks explicitly to continue; no client tool call was delivered before it.
+Reasoning/text already emitted, malformed calls, truncation, and transport errors
+are never replayed by that rule. A second empty result is `upstream_empty_response`.
+Text mode may correct a clearly attempted malformed action envelope only before
+text/reasoning delivery. Neither path retries tool execution.
+
+Structured first-hop errors retain safe `message`, `type`, and `code` across
+Chat, Messages, and Responses, including non-streaming HTTP failures. The relay
+limits error size, masks credentials, and does not forward headers, tracebacks,
+or entire bodies. Schema/parse failures are not collapsed into an undiagnosable
+generic stream error. Failed SSE has no successful terminal event.
 
 ## Validation and compatibility
 

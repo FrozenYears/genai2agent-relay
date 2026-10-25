@@ -12,6 +12,7 @@ from . import messages, responses
 from .actions import ActionTransportError
 from .config import RelayConfig
 from .engine import ActionRelay, RelayResult, TextCompletionBackend, UpstreamReply
+from .errors import error_fields
 from .normalize import chat_tools, prepare_chat
 from .normalize import normalize_choice as chat_choice
 from .upstream import UpstreamClient, UpstreamError
@@ -92,7 +93,7 @@ def create_app(
         try:
             return jsonify(backend.models())
         except UpstreamError as exc:
-            return _error(str(exc))
+            return _protocol_error({"error": error_fields(exc)}, 502)
 
     @app.post("/v1/chat/completions")
     @app.post("/chat/completions")
@@ -115,7 +116,7 @@ def create_app(
             return _chat_response(body, result)
         except (UpstreamError, ActionTransportError) as exc:
             logger.warning("Chat request failed model=%s error=%s", body.get("model"), type(exc).__name__)
-            return _error(str(exc))
+            return _protocol_error({"error": error_fields(exc)}, 502)
 
     @app.post("/v1/messages")
     def anthropic_messages():
@@ -136,7 +137,7 @@ def create_app(
             result = action_relay.run(relay_request)
         except (UpstreamError, ActionTransportError) as exc:
             logger.warning("Messages request failed model=%s error=%s", body.get("model"), type(exc).__name__)
-            return _protocol_error(messages.error(str(exc)), 502)
+            return _protocol_error({"type": "error", "error": error_fields(exc)}, 502)
         return jsonify(messages.build_response(body, result))
 
     @app.post("/v1/messages/count_tokens")
@@ -167,7 +168,7 @@ def create_app(
             result = action_relay.run(relay_request)
         except (UpstreamError, ActionTransportError) as exc:
             logger.warning("Responses request failed model=%s error=%s", body.get("model"), type(exc).__name__)
-            return _protocol_error(responses.error(str(exc), "server_error"), 502)
+            return _protocol_error({"error": error_fields(exc)}, 502)
         return jsonify(responses.build_response(body, result))
 
     @app.post("/v1/responses/input_tokens")

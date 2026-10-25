@@ -8,6 +8,7 @@ from typing import Any, Iterator
 from . import messages, responses
 from .actions import ActionCall, ActionTransportError
 from .engine import ActionRelay, RelayRequest
+from .errors import error_fields
 from .upstream import UpstreamError
 
 
@@ -52,7 +53,7 @@ def chat_events(body: dict[str, Any], relay: ActionRelay, request: RelayRequest)
                 yield chunk({}, "tool_calls" if result.action.calls else "stop", **extra)
                 yield "data: [DONE]\n\n"
     except (UpstreamError, ActionTransportError) as exc:
-        yield _sse({"error": {"type": "api_error", "message": str(exc)}})
+        yield _sse({"error": error_fields(exc)})
     finally:
         events.close()
 
@@ -110,7 +111,7 @@ def message_events(body: dict[str, Any], relay: ActionRelay, request: RelayReque
                                   "output_tokens": int(usage.get("completion_tokens") or usage.get("output_tokens") or 0)})
                 yield emit("message_stop")
     except (UpstreamError, ActionTransportError) as exc:
-        yield _sse(messages.error(str(exc)), "error")
+        yield _sse({"type": "error", "error": error_fields(exc)}, "error")
     finally:
         events.close()
 
@@ -183,8 +184,8 @@ def response_events(body: dict[str, Any], relay: ActionRelay, request: RelayRequ
                 response.update(status="completed", output=items, output_text=result.action.text, usage=responses._usage(result))
                 yield emit("response.completed", response=response)
     except (UpstreamError, ActionTransportError) as exc:
-        failure = {"type": "server_error", "code": "upstream_error", "message": str(exc)}
-        yield emit("error", code=failure["code"], message=str(exc), param=None)
+        failure = error_fields(exc)
+        yield emit("error", code=failure["code"], message=failure["message"], param=None)
         response.update(status="failed", output=items, error=failure)
         yield emit("response.failed", response=response)
     finally:

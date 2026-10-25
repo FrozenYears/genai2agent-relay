@@ -8,10 +8,7 @@ import requests
 from .actions import strict_json_loads
 from .config import RelayConfig
 from .engine import RelayEvent, TextCompletionRequest, UpstreamReply
-
-
-class UpstreamError(RuntimeError):
-    pass
+from .errors import UpstreamError
 
 
 def api_base(base: str) -> str:
@@ -29,6 +26,25 @@ class UpstreamClient:
         if self.config.upstream_api_key:
             headers["Authorization"] = f"Bearer {self.config.upstream_api_key}"
         return headers
+
+    def _http_error(self, response: requests.Response) -> UpstreamError:
+        fallback = f"First-hop service returned HTTP {response.status_code}"
+        limit = min(self.config.max_action_bytes, 16_384)
+        body = bytearray()
+        try:
+            # 错误响应也必须有界读取，不能用 response.text/json 绕过流式字节上限。
+            for chunk in response.iter_content(chunk_size=1):
+                if len(body) + len(chunk) > limit:
+                    return UpstreamError(fallback)
+                body.extend(chunk)
+            value = strict_json_loads(body.decode("utf-8"))
+        except (ValueError, UnicodeError, RecursionError, requests.RequestException):
+            return UpstreamError(fallback)
+        error = value.get("error") if isinstance(value, dict) else None
+        return UpstreamError.from_first_hop(error, fallback, self._error_secrets())
+
+    def _error_secrets(self) -> tuple[str, str]:
+        return self.config.upstream_api_key or "", self.config.relay_api_key or ""
 
     @staticmethod
     def _payload(request: TextCompletionRequest) -> dict[str, Any]:
@@ -64,7 +80,7 @@ class UpstreamClient:
                 timeout=(self.config.upstream_connect_timeout, self.config.upstream_read_timeout),
             )
             if response.status_code != 200:
-                raise UpstreamError(f"First-hop service returned HTTP {response.status_code}")
+                raise self._http_error(response)
             content: list[str] = []
             reasoning: list[str] = []
             calls: dict[int, dict[str, Any]] = {}
@@ -88,10 +104,15 @@ class UpstreamClient:
                     break
                 try:
                     chunk = strict_json_loads(data)
+                except (ValueError, RecursionError) as exc:
+                    raise UpstreamError("First-hop service returned invalid SSE JSON", code="upstream_invalid_response") from exc
+                try:
                     if not isinstance(chunk, dict):
                         raise ValueError("SSE data is not an object")
-                    if chunk.get("error"):
-                        raise UpstreamError("First-hop service returned a stream error")
+                    if "error" in chunk:
+                        raise UpstreamError.from_first_hop(
+                            chunk["error"], "First-hop service returned a stream error", self._error_secrets(),
+                        )
                     if isinstance(chunk.get("usage"), dict):
                         usage = chunk["usage"]
                     choices = chunk.get("choices", [])
@@ -152,9 +173,12 @@ class UpstreamClient:
                             raise ValueError("Duplicate terminal finish reason")
                         finish = choice["finish_reason"]
                 except (ValueError, KeyError, TypeError, AttributeError) as exc:
-                    raise UpstreamError("First-hop service returned an invalid SSE completion: " + str(exc)) from exc
+                    raise UpstreamError(
+                        "First-hop service returned an invalid SSE completion: " + str(exc),
+                        secrets=self._error_secrets(),
+                    ) from exc
             if not done or finish is None:
-                raise UpstreamError("First-hop stream ended before finish_reason and [DONE]")
+                raise UpstreamError("First-hop stream ended before finish_reason and [DONE]", code="upstream_stream_incomplete")
             if calls and (finish != "tool_calls" or sorted(calls) != list(range(len(calls)))):
                 raise UpstreamError("First-hop tool batch was incomplete or had an invalid finish reason")
             if finish == "tool_calls" and not calls:
@@ -202,17 +226,17 @@ class UpstreamClient:
                     raise UpstreamError("First-hop SSE event exceeds MAX_ACTION_BYTES")
                 pending.extend(part)
         if pending or data:
-            raise UpstreamError("First-hop SSE ended in an incomplete event")
+            raise UpstreamError("First-hop SSE ended in an incomplete event", code="upstream_stream_incomplete")
 
     def models(self) -> dict[str, Any]:
         response = None
         try:
             response = self.session.get(
-                api_base(self.config.upstream_base_url) + "/models", headers=self._headers(),
+                api_base(self.config.upstream_base_url) + "/models", headers=self._headers(), stream=True,
                 timeout=(self.config.upstream_connect_timeout, self.config.upstream_read_timeout),
             )
             if response.status_code != 200:
-                raise UpstreamError(f"First-hop service returned HTTP {response.status_code}")
+                raise self._http_error(response)
             value = response.json()
             if not isinstance(value, dict):
                 raise UpstreamError("First-hop model endpoint returned an invalid object")
