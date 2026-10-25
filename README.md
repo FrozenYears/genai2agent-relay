@@ -57,14 +57,33 @@ completion. Non-streaming failures return HTTP 502. Closing a consumed stream
 closes the upstream HTTP response. A blocked connection before response headers
 is still bounded by the configured timeouts, not guaranteed to cancel instantly.
 
-The relay itself never retries model generation in native mode. Its paired first
-hop permits one continuation only for a tool-enabled request that finished with
-zero text, zero reasoning, zero calls, and a normal `stop`. It preserves history
-and asks explicitly to continue; no client tool call was delivered before it.
-Reasoning/text already emitted, malformed calls, truncation, and transport errors
-are never replayed by that rule. A second empty result is `upstream_empty_response`.
-Text mode may correct a clearly attempted malformed action envelope only before
-text/reasoning delivery. Neither path retries tool execution.
+### 第一跳空继续预算与共享时限
+
+默认 native 链路的生成恢复只由第一跳负责，relay 不再叠加重试，防止两层预算相乘。
+只有启用工具协议恢复（`recover_empty=True`）且网页返回**零正文、零思考、零调用、
+正常 `stop`**，才消耗额外继续预算：默认额外 3 次，含首次最多 4 次；合法范围为
+`0..10`，0 仅禁用额外继续。持续为空并耗尽次数时返回 `upstream_empty_response`。
+
+每次继续保留完整原历史，以原 `chatInfo` 加真实“第 k/N 次”标记与明确继续指令，
+不累积空 assistant 或旧继续提示，不切模型、不降级 text，不重放客户端已执行工具。
+已经产生正文/思考、坏 JSON/Schema、解析错误、断流或截断均禁止重放。
+普通无工具请求不空继续，也不使用下述工具请求总时限。
+
+所有工具协议请求从首次上游生成开始共用默认 **600 秒**窗口，不含附件预处理；
+首次及所有继续共享 deadline，ping/心跳和继续次数都不续期。0 次额外继续仍受该窗口
+约束。即使已输出或正在缓冲调用，到期仍返回 `upstream_request_timeout`，
+不交付未校验调用。第一跳关闭已取得的实际 HTTP socket；尚未取得响应头的阻塞请求
+不能立即打断，但主响应按总时限失败，worker 返回后清理，不再发新继续。
+
+这与 relay 的 `UPSTREAM_READ_TIMEOUT` 不同：read timeout 限制网络读取间等待，
+持续 ping 可以避免它，却不会延长生成总窗口；整场 agent 任务可包含多次请求和
+本地工具执行，不以这个单请求窗口计时。次数或时间耗尽仍会中断当前 HTTP，
+代理不会假报任务完成。agent 可根据真实错误、完整历史和实际工具结果显式继续；
+增加预算仅恢复未交付内容的空完成，不保证平台始终可用或任务永不中断。
+恢复 decision 图见 [阶段说明第四节](../STAGE_NATIVE_FIRST.md#4-sse-生命周期终态与取消)。
+
+显式 text 模式只在正文/思考尚未交付时对明确坏封套作有限纠错；
+不重试空回答、断流、截断、普通示例或客户端工具执行，不是 native 失败的自动兜底。
 
 Structured first-hop errors retain safe `message`, `type`, and `code` across
 Chat, Messages, and Responses, including non-streaming HTTP failures. The relay
@@ -91,6 +110,7 @@ generic stream error. Failed SSE has no successful terminal event.
   must use compatible declarations or a provider with the required native support.
 - `previous_response_id`, `item_reference`, and server-side storage (`store=true`)
   are rejected. Send complete history on every request.
+- 附件随请求交给第一跳处理；不提供 Files API（`/v1/files`）、附件缓存或持久 `file_id` 存储。
 - Native history preserves call IDs and reasoning metadata where expressible in
   the Chat transport. Cross-provider encrypted reasoning is not interchangeable.
   Messages output still uses `genai-compat-no-signature`, not a genuine Anthropic
@@ -167,13 +187,30 @@ claim that every attachment combination was revalidated in this refactor.
 | `HOST` | `127.0.0.1` | Listen address |
 | `PORT` | `31110` | Listen port |
 | `UPSTREAM_CONNECT_TIMEOUT` | `10` | Connect timeout, seconds |
-| `UPSTREAM_READ_TIMEOUT` | `1800` | Socket read timeout, seconds |
+| `UPSTREAM_READ_TIMEOUT` | `1800` | 上游 socket 两次读取间的等待超时（秒），不是总生成或 agent 任务时限 |
 | `UPSTREAM_ACTION_RETRIES` | `2` | Text-mode serialization retries before delivery; native mode ignores it |
 | `MAX_ACTION_BYTES` | `1048576` | Decoded response payload budget; also bounds one incomplete SSE event |
 
 The payload budget counts text, reasoning, tool names, IDs, and arguments while
 reading. Repeated SSE metadata and heartbeats do not consume the payload budget.
 Protect non-loopback deployments with TLS, authentication, and network policy.
+
+第一跳的设置在**根项目** `.env` 或其启动命令配置，不是 relay 环境变量：
+
+| 第一跳环境变量 | CLI 参数 | 默认值 | 约束 |
+| --- | --- | --- | --- |
+| `GENAI_EMPTY_CONTINUATIONS` | `--empty-continuations` | `3` | 额外次数，整数 `0..10`，含首次最多 `N+1` 次 |
+| `GENAI_TOOL_REQUEST_TIMEOUT_SECONDS` | `--tool-request-timeout` | `600` | 所有生成共用的秒数，有限正数，不含附件预处理 |
+
+第一跳 `Config` 校验拒绝上述两项的布尔值。第一跳启动示例（在根项目运行）：
+
+```bash
+pixi run serve --empty-continuations 3 --tool-request-timeout 600
+```
+
+第一跳单次网络 connect/read timeout 为 10/300 秒；relay 的 connect/read 设置仅约束
+relay 到第一跳的网络等待。不要用调大 read timeout 代替调整共享生成窗口，也不要把
+`UPSTREAM_ACTION_RETRIES` 当作 native 空继续次数。
 
 ## Embedded engine
 
