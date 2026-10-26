@@ -138,9 +138,9 @@ flowchart LR
 | `native`（默认） | 两跳间传结构化工具与 SSE | relay 不重试；由第一跳恢复 |
 | `text`（显式） | 仅支持文本的 backend | 未交付内容的坏封套，默认额外 2 次 |
 
-- 正文/思考增量返回；工具参数收齐并整批校验后交付，不剔除坏项做部分执行。
+- 第一跳启用工具纠错时，暂存本代正文、思考和调用，完整校验通过后才交付；relay 即时发送开始事件并转发心跳。正文显示会延后，无工具或关闭工具纠错时保留实时增量。
 - 第一跳默认空继续 8 次、工具纠错 3 次，共享 900 秒请求窗口；在第一跳配置。
-- 已交付内容、断流、截断和网络错误不重放；失败不发成功终态。
+- 已交付内容、断流、截断、网络错误、取消和到期不重放；坏批次不剔除成员做部分执行，失败不发成功终态。
 
 > [!IMPORTANT]
 > `native` 不代表学校网页开放了原生函数输入。
@@ -151,26 +151,28 @@ flowchart LR
 | 项目 | 原版 | 当前 |
 | --- | --- | --- |
 | 上游 | 等完整文本，拒绝上游原生调用 | 逐段接收回复，保留结构化调用 |
-| 下游 SSE | 完整文本校验后才输出 | 开始事件先发，正文/思考增量返回 |
+| 下游 SSE | 完整文本校验后才输出 | 开始事件与心跳即时；启用工具纠错时按第一跳校验时机交付内容 |
 | 校验与恢复 | 已有 Schema 校验，文本纠错在 relay | 严格整批交付，native 请求恢复集中第一跳 |
 
 完整基线与兼容代价见[架构对照](https://github.com/FrozenYears/shanghaitech-genai2api/blob/main/docs/STAGE_NATIVE_FIRST.md#5-与双跳原仓库及本地重构前分支的对照)。自定义 backend 的接口迁移见[配置说明](docs/CONFIGURATION.md#自定义后端)。
 
 ## 实测与资料
 
-2026-10-25，真实 omp 经完整双跳与监督器验证同一套 Python/CSV/SQLite 任务。
+下表保留 2026-10-25 的历史样本，并补充 2026-10-26 修复后正式双跳环境下的 Kimi 实测；任务均为同一套 Python/CSV/SQLite 持续开发项目。
 
-| 测试项 | deepseek-pro | Kimi-k3 |
-| --- | ---: | ---: |
-| 执行总耗时 | 595.000 秒 | 1825.531 秒 |
-| 阶段完成率 | 20/20 | 20/20 |
-| 工具调用总数 | 150 | 110 |
-| 第一跳空输出续作 / 工具纠错次数 | 8 / 4 | 0 / 0 |
-| 监督器介入反馈轮次 | 0 | 4 |
-| 人工交互调整次数 | 0 | 0 |
-| 独立自动化验收项通过数 | 71 项通过 | 71 项通过 |
+| 测试项 | deepseek-pro（10-25） | Kimi-k3（10-25） | Kimi-k3（10-26，修复后） |
+| --- | ---: | ---: | ---: |
+| 执行总耗时 | 595.000 秒 | 1825.531 秒 | 2180.765 秒 |
+| 阶段完成率 | 20/20 | 20/20 | 20/20 |
+| 工具调用总数 | 150 | 110 | 122 |
+| 第一跳空输出续作 / 工具纠错次数 | 8 / 4 | 0 / 0 | 未单独归因 |
+| 监督器介入反馈轮次 | 0 | 4 | 0 |
+| 人工交互调整次数 | 0 | 0 | 0 |
+| 独立自动化验收项通过数 | 71 项通过 | 71 项通过 | 71 项通过 |
 
-- 这不是 relay 单独的成功率或任意任务保证。[实测报告](https://github.com/FrozenYears/shanghaitech-genai2api/blob/main/docs/TEST_REPORT_deepseek_pro.md)
+- 10-26 样本无故障注入，关闭客户端自动重试，额外反馈预算为 0；90 次模型请求完成 20 阶段，客户端未收到未恢复的协议错误。
+- 阶段 15 有一次 SQLite 迁移业务验收失败，Kimi 在原回合修正后通过；这是一次 `bash` 验收错误，不是协议中断。共享服务有并发流量，第一跳恢复次数未单独归因，不能记作 0。
+- 这是完整双跳任务结果，不是 relay 单独的成功率；不同日期、预算和负载下的样本不是受控对照或任意任务保证。[今日脱敏结果](https://github.com/FrozenYears/shanghaitech-genai2api/blob/main/validation/kimi-formal-2026-10-26.json) · [实测报告](https://github.com/FrozenYears/shanghaitech-genai2api/blob/main/docs/TEST_REPORT_deepseek_pro.md)
 - [完整配置与限制](docs/CONFIGURATION.md) · [附件与思考透传](docs/genai2api-feature-passthrough.zh-CN.md) · [历史修复](docs/action-envelope-fixes.zh-CN.md)
 
 独立测试：在现有虚拟环境安装 pytest 后运行 `.venv/bin/python -m pytest tests -q`；Windows 替换解释器路径。部署检查不能只看单元测试。
