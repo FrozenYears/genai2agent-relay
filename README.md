@@ -158,7 +158,7 @@ flowchart LR
 
 ## 实测与资料
 
-2026-10-25，真实 omp 经完整双跳与监督器验证同一套 Python/CSV/SQLite 任务。以下为已有验收记录，本次文档更新未重新测试。
+2026-10-25，真实 omp 经完整双跳与监督器验证同一套 Python/CSV/SQLite 任务。
 
 | 测试项 | deepseek-pro | Kimi-k3 |
 | --- | ---: | ---: |
