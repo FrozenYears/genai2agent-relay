@@ -4,33 +4,25 @@ GenAI2AgentRelay 是连接 agent 客户端与学校网页代理的本地 HTTP �
 
 它不自带模型、不登录学校账号，也不替客户端执行工具。
 
-```mermaid
-flowchart LR
-    A[agent 客户端] <-->|三种兼容协议| R["第二跳 · 31110<br/>genai2agent-relay"]
-    R <-->|Chat Completions 与 SSE| F["第一跳 · 31100<br/>shanghaitech-genai2api"]
-    F <-->|网页登录与聊天请求| W[学校 GenAI 网页后端]
-```
+## 目录
 
-## 与第一跳的区别
+- [部署与接入](#部署与接入)
+  - [快速开始](#快速开始)
+  - [Windows PowerShell 安装](#windows-powershell-安装)
+  - [客户端接入](#客户端接入)
+- [功能与设计](#功能与设计)
+  - [与第一跳的区别](#与第一跳的区别)
+  - [工具调用如何处理](#工具调用如何处理)
+  - [与重构前的区别](#与重构前的区别)
+- [实测与资料](#实测与资料)
 
-| 服务 | 主要对接谁 | 负责什么 |
-| --- | --- | --- |
-| 第一跳 `shanghaitech-genai2api` | 学校网页后端 | 管理网页登录，处理附件，把工具定义写入网页提示，并解析模型输出 |
-| 第二跳 `genai2agent-relay` | agent 客户端和第一跳 | 将三种客户端协议转换为第一跳的 Chat 请求，保留工具 ID/历史结果，转发流式回复并校验工具批次 |
-
-- 学校账号只配置在第一跳；relay 用本地 `UPSTREAM_API_KEY` 访问它。
-- 客户端只配置 relay 地址和 `RELAY_API_KEY`，不需要知道学校网页请求格式。
-- 第一跳本身也提供三种兼容接口，合适的客户端可直接连 31100；双跳部署时统一连 relay 的 31110。
-
-两跳名称沿用项目约定，客户端请求先到第二跳。relay 不绕过第一跳访问学校，也不会因多加一层代理就让模型获得原生函数输入或本地文件权限。
-
-[启动](#快速开始) · [接入地址](#客户端接入) · [工作原理](#工具调用如何处理) · [详细配置](docs/CONFIGURATION.md)
+## 部署与接入
 
 > [!NOTE]
 > 使用 `main` 分支，先按[第一跳 README](https://github.com/FrozenYears/shanghaitech-genai2api/blob/main/README.md)启动 31100 服务。
 > 学校网页登录、附件处理与工具适配均由第一跳负责。
 
-## 快速开始
+### 快速开始
 
 需 Git、uv 及 Python 3.10+；依赖仅安装到本仓库 `.venv`。
 
@@ -47,7 +39,7 @@ uv pip install --python .venv/bin/python -e .
 cp .env.example .env
 ```
 
-### Windows PowerShell 安装
+#### Windows PowerShell 安装
 
 ```powershell
 uv pip install --python .venv/Scripts/python.exe -e .
@@ -90,7 +82,7 @@ Windows 使用 `.venv/Scripts/python.exe main.py`。
 > relay 默认仅监听 `127.0.0.1`，但第一跳当前监听 `0.0.0.0`。
 > 请设置两处本地 Key 并限制网络访问，切勿提交 `.env` 或直接暴露到公网。
 
-## 客户端接入
+### 客户端接入
 
 客户端 Key 使用 `RELAY_API_KEY`，支持 Bearer 或 `x-api-key`。
 
@@ -110,11 +102,33 @@ curl -fsS http://127.0.0.1:31110/v1/models \
 - 模型名称使用 `/v1/models` 返回的 `id`。
 - Claude Code 配置见[适配指南](docs/claude-code-adapter-reference.zh-CN.md)。
 
-## 工具调用如何处理
+## 功能与设计
+
+```mermaid
+flowchart LR
+    A[agent 客户端] <-->|三种兼容协议| R["第二跳 · 31110<br/>genai2agent-relay"]
+    R <-->|Chat Completions 与 SSE| F["第一跳 · 31100<br/>shanghaitech-genai2api"]
+    F <-->|网页登录与聊天请求| W[学校 GenAI 网页后端]
+```
+
+### 与第一跳的区别
+
+| 服务 | 主要对接谁 | 负责什么 |
+| --- | --- | --- |
+| 第一跳 `shanghaitech-genai2api` | 学校网页后端 | 管理网页登录，处理附件，把工具定义写入网页提示，并解析模型输出 |
+| 第二跳 `genai2agent-relay` | agent 客户端和第一跳 | 将三种客户端协议转换为第一跳的 Chat 请求，保留工具 ID/历史结果，转发流式回复并校验工具批次 |
+
+- 学校账号只配置在第一跳；relay 用本地 `UPSTREAM_API_KEY` 访问它。
+- 客户端只配置 relay 地址和 `RELAY_API_KEY`，不需要知道学校网页请求格式。
+- 第一跳本身也提供三种兼容接口，合适的客户端可直接连 31100；双跳部署时统一连 relay 的 31110。
+
+两跳名称沿用项目约定，客户端请求先到第二跳。relay 不绕过第一跳访问学校，也不会因多加一层代理就让模型获得原生函数输入或本地文件权限。
+
+### 工具调用如何处理
 
 1. relay 保留客户端工具 Schema、角色、调用 ID 及历史结果，转发给第一跳。
 2. 网页无原生工具通道时，第一跳将工具规则写入提示，并解析模型输出的调用文本。
-3. 第一跳与 relay 校验完整批次，通过后按客户端协议交付。
+3. 第一跳与 relay 校验完整调用批次，通过后按客户端协议交付。
 4. 本地 agent 执行工具并回传结果；relay 不执行命令、不读取参数指定文件。
 
 [网页模型的工具调用示例](https://github.com/FrozenYears/shanghaitech-genai2api/blob/main/README.md#网页模型如何调用工具)
@@ -132,7 +146,7 @@ curl -fsS http://127.0.0.1:31110/v1/models \
 > `native` 不代表学校网页开放了原生函数输入。
 > 无 Files API、Responses 服务端状态或 custom grammar；工具授权由客户端负责，代理不是 OS 沙箱。
 
-## 与重构前的区别
+### 与重构前的区别
 
 | 项目 | 原版 | 当前 |
 | --- | --- | --- |
@@ -142,9 +156,9 @@ curl -fsS http://127.0.0.1:31110/v1/models \
 
 完整基线与兼容代价见[架构对照](https://github.com/FrozenYears/shanghaitech-genai2api/blob/main/docs/STAGE_NATIVE_FIRST.md#5-与双跳原仓库及本地重构前分支的对照)。自定义 backend 的接口迁移见[配置说明](docs/CONFIGURATION.md#自定义后端)。
 
-## 实测与文档
+## 实测与资料
 
-- 已记录的完整双跳 + omp 监督器测试中，DeepSeek、Kimi 均完成 20 阶段，最终 71 项验收通过；Kimi 用到 4 次自动反馈。
+- 在已记录的完整双跳与 omp 监督器测试中，DeepSeek、Kimi 均完成 20 阶段，最终 71 项验收通过；Kimi 用到 4 次自动反馈。
 - 这不是 relay 单独的成功率或任意任务保证。[实测报告](https://github.com/FrozenYears/shanghaitech-genai2api/blob/main/docs/TEST_REPORT_deepseek_pro.md)
 - [完整配置与限制](docs/CONFIGURATION.md) · [附件与思考透传](docs/genai2api-feature-passthrough.zh-CN.md) · [历史修复](docs/action-envelope-fixes.zh-CN.md)
 
