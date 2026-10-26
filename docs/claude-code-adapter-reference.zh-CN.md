@@ -73,15 +73,15 @@ Anthropic 签名；保留可表达的历史元数据不表示网页消费它们�
 
 ### 自动恢复与失败边界
 
-默认native只在第一跳恢复，relay不叠加重试。严格空stop（零原始正文/思考/调用）默认额外继续8次；当前回退版本在正常结束的工具协议错误且未交付正文、思考或调用时，默认额外纠错3次。正文和思考实时输出，工具整批校验后交付，不补参数、不修括号、不放行部分批次。
+默认native只在第一跳恢复，relay不叠加重试。严格空stop默认额外继续8次，正常结束且未交付的坏工具批次默认额外纠错3次。正文/思考即时输出并保留，不再阻止工具纠错；不撤回或隐藏失败尝试。工具批次仍收全校验，不补参、不修括号、不放行部分调用。
 
-原`chatInfo`加真实次数和安全反馈，完整原历史与约束不变，不虚构结果、不换模型、不降级、不重放客户端工具。两类预算独立累计，默认最多12代。已交付内容、网络错误、断流、截断、取消或到期不重放；普通非空计划不按猜测继续。失败没有成功终态，空耗尽为`upstream_empty_response`，纠错耗尽保留原错误码。
+原`chatInfo`加真实次数与安全反馈，历史和约束不变，不虚构结果、不换模型、不降级、不重放已交付工具；独立计数默认最多12代。网络/EOF/截断/取消/到期不重放；`auto`普通计划可结束，`required/指定工具`未调用按选择错误纠正。失败没有成功终态，空耗尽为`upstream_empty_response`，纠错耗尽保留原错误码。
 
 所有工具协议生成共用默认 900 秒 deadline，不含附件预处理；ping/心跳、新一代和恢复类别切换不续期。到期为 `upstream_request_timeout`，不交付未校验调用。0 只关闭对应次数；普通无工具请求不使用这些预算/deadline。第一跳网络 connect/read 为 10/300 秒，relay read 默认1800秒，与该累计窗口及整场任务预算不同。
 
 代理不知道业务是否完成。根项目可选 omp 监督器使用独立真实验收，在协议失败、验收失败或停滞后自动反馈继续，默认额外8次、整场45分钟；单HTTP耗尽不必立即等待人工。它只用于显式启动的 omp 工作流，不自动改变 Claude Code 的工作循环。任务总预算耗尽或安全故障会保存检查点并明确停止，不无限重试、不伪报成功。当前没有跨进程自动恢复。
 
-完整状态图和安全边界见[架构第四节](https://github.com/FrozenYears/shanghaitech-genai2api/blob/main/docs/STAGE_NATIVE_FIRST.md#4-sse-生命周期终态与取消)；监督器用法见[根 README](https://github.com/FrozenYears/shanghaitech-genai2api/blob/main/README.md)。
+完整状态图和安全边界见[候选架构第四节](https://github.com/FrozenYears/shanghaitech-genai2api/blob/fix/streaming-repair-image-history/docs/STAGE_NATIVE_FIRST.md#4-sse-生命周期终态与取消)；监督器用法见[同分支根 README](https://github.com/FrozenYears/shanghaitech-genai2api/blob/fix/streaming-repair-image-history/README.md)。
 
 ## 文本模式与当前上游范围
 
@@ -94,7 +94,7 @@ base 或跳过第一跳的直连方案。`UPSTREAM_BASE_URL=http://127.0.0.1:311
 仍须保留，默认 `native` 不变。学校网页登录认证由第一跳负责；
 `UPSTREAM_API_KEY` 与 `RELAY_API_KEY` 均为本地代理鉴权，不是学校独立 API Key。
 
-完整链路及重构差异见根项目的 [原生优先阶段说明](https://github.com/FrozenYears/shanghaitech-genai2api/blob/main/docs/STAGE_NATIVE_FIRST.md)。
+完整链路及重构差异见根项目的[候选阶段说明](https://github.com/FrozenYears/shanghaitech-genai2api/blob/fix/streaming-repair-image-history/docs/STAGE_NATIVE_FIRST.md)。
 阶段短样本只能说明当时的协议行为，不能代替正式服务上的长时实际工作验收。
 
 附件仍由第一跳逐请求处理，不提供 `/v1/files`、持久 `file_id` 或附件缓存。
