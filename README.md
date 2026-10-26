@@ -158,7 +158,18 @@ flowchart LR
 
 ## 实测与资料
 
-- 在已记录的完整双跳与 omp 监督器测试中，DeepSeek、Kimi 均完成 20 阶段，最终 71 项验收通过；Kimi 用到 4 次自动反馈。
+2026-10-25，真实 omp 经完整双跳与监督器验证同一套 Python/CSV/SQLite 任务。以下为已有验收记录，本次文档更新未重新测试。
+
+| 测试项 | deepseek-pro | Kimi-k3 |
+| --- | ---: | ---: |
+| 执行总耗时 | 595.000 秒 | 1825.531 秒 |
+| 阶段完成率 | 20/20 | 20/20 |
+| 工具调用总数 | 150 | 110 |
+| 第一跳空输出续作 / 工具纠错次数 | 8 / 4 | 0 / 0 |
+| 监督器介入反馈轮次 | 0 | 4 |
+| 人工交互调整次数 | 0 | 0 |
+| 独立自动化验收项通过数 | 71 项通过 | 71 项通过 |
+
 - 这不是 relay 单独的成功率或任意任务保证。[实测报告](https://github.com/FrozenYears/shanghaitech-genai2api/blob/main/docs/TEST_REPORT_deepseek_pro.md)
 - [完整配置与限制](docs/CONFIGURATION.md) · [附件与思考透传](docs/genai2api-feature-passthrough.zh-CN.md) · [历史修复](docs/action-envelope-fixes.zh-CN.md)
 
