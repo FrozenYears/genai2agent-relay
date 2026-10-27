@@ -19,7 +19,7 @@ GenAI2AgentRelay 是连接 agent 客户端与学校网页代理的本地 HTTP �
 ## 部署与接入
 
 > [!NOTE]
-> 使用 `main` 分支，先按[第一跳 README](https://github.com/FrozenYears/shanghaitech-genai2api/blob/main/README.md)启动 31100 服务。
+> 当前为 `fix/streaming-tool-webp-stepwise` 渐进修复分支，main不更新。先按[同分支第一跳 README](https://github.com/FrozenYears/shanghaitech-genai2api/blob/fix/streaming-tool-webp-stepwise/README.md)启动31100服务。
 > 学校网页登录、附件处理与工具适配均由第一跳负责。
 
 ### 快速开始
@@ -27,7 +27,7 @@ GenAI2AgentRelay 是连接 agent 客户端与学校网页代理的本地 HTTP �
 需 Git、uv 及 Python 3.10+；依赖仅安装到本仓库 `.venv`。
 
 ```bash
-git clone --branch main https://github.com/FrozenYears/genai2agent-relay.git
+git clone --branch fix/streaming-tool-webp-stepwise https://github.com/FrozenYears/genai2agent-relay.git
 cd genai2agent-relay
 uv venv .venv
 ```
@@ -131,7 +131,7 @@ flowchart LR
 3. 第一跳与 relay 校验完整调用批次，通过后按客户端协议交付。
 4. 本地 agent 执行工具并回传结果；relay 不执行命令、不读取参数指定文件。
 
-[网页模型的工具调用示例](https://github.com/FrozenYears/shanghaitech-genai2api/blob/main/README.md#网页模型如何调用工具)
+[网页模型的工具调用示例](https://github.com/FrozenYears/shanghaitech-genai2api/blob/fix/streaming-tool-webp-stepwise/README.md#网页模型如何调用工具)
 
 | 模式 | 用途 | 生成重试 |
 | --- | --- | --- |
@@ -140,7 +140,7 @@ flowchart LR
 
 - 正文与思考实时增量返回，起始事件和心跳即时发送；工具参数收齐并整批校验后交付，不剔除坏项做部分执行。已撤销第一跳整代暂存。
 - 第一跳默认空继续 8 次、工具纠错 3 次，共享 900 秒请求窗口；在第一跳配置。
-- 已交付内容、断流、截断、网络错误、取消和到期不重放；坏批次不剔除成员做部分执行，失败不发成功终态。
+- 已显示正文/思考保留，第一跳仍可纠正正常终态的未交付坏批次；已交付工具、断流、截断、网络错误、取消和到期不重放。坏批次不剔除成员做部分执行，失败不发成功终态。
 
 > [!IMPORTANT]
 > `native` 不代表学校网页开放了原生函数输入。
@@ -154,7 +154,7 @@ flowchart LR
 | 下游 SSE | 完整文本校验后才输出 | 开始事件、正文、思考和心跳实时返回，工具批次完整校验后交付 |
 | 校验与恢复 | 已有 Schema 校验，文本纠错在 relay | 严格整批交付，native 请求恢复集中第一跳 |
 
-完整基线与兼容代价见[架构对照](https://github.com/FrozenYears/shanghaitech-genai2api/blob/main/docs/STAGE_NATIVE_FIRST.md#5-与双跳原仓库及本地重构前分支的对照)。自定义 backend 的接口迁移见[配置说明](docs/CONFIGURATION.md#自定义后端)。
+完整基线与兼容代价见[架构对照](https://github.com/FrozenYears/shanghaitech-genai2api/blob/fix/streaming-tool-webp-stepwise/docs/STAGE_NATIVE_FIRST.md#5-与双跳原仓库及本地重构前分支的对照)。自定义 backend 的接口迁移见[配置说明](docs/CONFIGURATION.md#自定义后端)。
 
 ## 实测与资料
 
