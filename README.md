@@ -142,6 +142,8 @@ flowchart LR
 - 第一跳默认空继续 8 次、工具纠错 3 次，共享 900 秒请求窗口；在第一跳配置。
 - 已显示正文/思考保留，第一跳仍可纠正正常终态的未交付坏批次；已交付工具、断流、截断、网络错误、取消和到期不重放。坏批次不剔除成员做部分执行，失败不发成功终态。
 - 第一跳已开始纠正坏调用后，auto不能以无调用正文放弃待交付批次；预算耗尽保留`tool_repair_incomplete`，relay不补发成功终态。此规则不代替客户端判断业务是否完成，也不强制所有普通问答调用工具。
+- 内联静态WebP由第一跳无损转PNG；当前多图使用user图像上下文、文本只传一次，历史图片不移动。relay不解码图片。动画、大小和像素错误在开始SSE前拒绝，不靠清历史继续。
+- [本分支分阶段证据](https://github.com/FrozenYears/shanghaitech-genai2api/blob/fix/streaming-tool-webp-stepwise/validation/stepwise-streaming-webp-2026-10-27.json)保留正常结束零调用、协议失败和图片格式差异；图片内容/顺序正确不等于模型严格遵循输出排版，也不代表所有自然长任务成功。
 
 > [!IMPORTANT]
 > `native` 不代表学校网页开放了原生函数输入。
