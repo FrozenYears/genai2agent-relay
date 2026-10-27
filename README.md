@@ -145,6 +145,7 @@ flowchart LR
 - [候选验收记录](https://github.com/FrozenYears/shanghaitech-genai2api/blob/fix/streaming-repair-image-history/validation/streaming-images-2026-10-26.json)：包括真实 Kimi 多次读 WebP 与同会话报错后继续，不需要清空历史。
 - 本次只调整第一跳提示及明确缺调用的反馈，正文/思考流式不变。`required/指定工具`不接受只有计划或围栏示例；`auto`普通答复不强制重试，引用不自动执行。
 - [提示试验记录](https://github.com/FrozenYears/shanghaitech-genai2api/blob/fix/kimi-action-prompt/validation/kimi-action-prompt-2026-10-27.json)包含固定背景对照及真实 omp 读改回读；未证明新提示优于旧版或可根治长任务停滞。
+- [最新正式长任务实测](https://github.com/FrozenYears/shanghaitech-genai2api/blob/fix/kimi-action-prompt/validation/kimi-action-long-2026-10-27.json)：10-27正式31100/31110已切本分支。真实Kimi/omp运行1125.75秒，第9阶段仍出现计划型正常终答、零调用，前8阶段通过。没有Goal或验收追问，不把该结果宣称为20阶段成功。
 
 > [!IMPORTANT]
 > `native` 不代表学校网页开放了原生函数输入。
