@@ -81,7 +81,7 @@ Anthropic 签名；保留可表达的历史元数据不表示网页消费它们�
 
 代理不知道业务是否完成。根项目可选 omp 监督器使用独立真实验收，在协议失败、验收失败或停滞后自动反馈继续，默认额外8次、整场45分钟；单HTTP耗尽不必立即等待人工。它只用于显式启动的 omp 工作流，不自动改变 Claude Code 的工作循环。任务总预算耗尽或安全故障会保存检查点并明确停止，不无限重试、不伪报成功。当前没有跨进程自动恢复。
 
-完整状态图和安全边界见[架构第四节](https://github.com/FrozenYears/shanghaitech-genai2api/blob/fix/streaming-tool-webp-stepwise/docs/STAGE_NATIVE_FIRST.md#4-sse-生命周期终态与取消)；监督器用法见[根 README](https://github.com/FrozenYears/shanghaitech-genai2api/blob/fix/streaming-tool-webp-stepwise/README.md)。
+完整状态图和安全边界见[架构第四节](https://github.com/FrozenYears/shanghaitech-genai2api/blob/main/docs/STAGE_NATIVE_FIRST.md#4-sse-生命周期终态与取消)；监督器用法见[根 README](https://github.com/FrozenYears/shanghaitech-genai2api/blob/main/README.md)。
 
 ## 文本模式与当前上游范围
 
@@ -94,7 +94,7 @@ base 或跳过第一跳的直连方案。`UPSTREAM_BASE_URL=http://127.0.0.1:311
 仍须保留，默认 `native` 不变。学校网页登录认证由第一跳负责；
 `UPSTREAM_API_KEY` 与 `RELAY_API_KEY` 均为本地代理鉴权，不是学校独立 API Key。
 
-完整链路及重构差异见根项目的 [原生优先阶段说明](https://github.com/FrozenYears/shanghaitech-genai2api/blob/fix/streaming-tool-webp-stepwise/docs/STAGE_NATIVE_FIRST.md)。
+完整链路及重构差异见根项目的 [原生优先阶段说明](https://github.com/FrozenYears/shanghaitech-genai2api/blob/main/docs/STAGE_NATIVE_FIRST.md)。
 阶段短样本只能说明当时的协议行为，不能代替正式服务上的长时实际工作验收。
 
 附件仍由第一跳逐请求处理，不提供 `/v1/files`、持久 `file_id` 或附件缓存。
