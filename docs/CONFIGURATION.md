@@ -146,19 +146,21 @@ MAX_ACTION_BYTES=1048576
 | `GENAI_TOOL_REPAIR_ATTEMPTS` | `--tool-repair-attempts` | 未交付坏工具批次额外纠错 `3` 次，整数 `0..10` |
 | `GENAI_TOOL_REQUEST_TIMEOUT_SECONDS` | `--tool-request-timeout` | 所有生成共享 `900` 秒，有限正数，不含附件预处理 |
 
-完全空完成要求原始正文、思考、调用均为空且正常`stop`。当前回退版本仅在正常结束、发现明确工具协议错误且未交付正文/思考/调用时纠错。模型重新生成，不猜参数或修字符串。
+完全空完成要求原始正文、思考、调用均为空且正常`stop`。本分支允许正常结束的未交付坏工具批次在显示正文/思考后继续纠错；已显示进度不撤回，不整代暂存。模型重新生成，不猜参数或修字符串。
 
-两类次数累计、不相互重置，默认每请求最多`1+8+3=12`次生成。900秒窗口不因心跳或新一代续期。完整原历史和工具约束不变，不虚构结果、不换模型、不降级、不重放客户端操作。已交付内容、网络错误、断流、截断、取消或到期不重放；普通非空计划不按猜测继续。无工具请求不启用这些恢复或工具deadline。
+两类次数累计、不相互重置，默认每请求最多`1+8+3=12`次生成。900秒窗口不因心跳或新一代续期。完整原历史和工具约束不变，不虚构结果、不换模型、不降级、不重放客户端操作。已交付工具、网络错误、断流、截断、取消或到期不重放。无工具请求不启用这些恢复或工具deadline。
 
 空预算耗尽为 `upstream_empty_response`，纠错耗尽保留具体错误码并说明耗尽，deadline 为 `upstream_request_timeout`。失败没有成功终态，未校验调用不交付。第一跳关闭已取得的 socket；尚未取得响应头时，主响应可按窗口失败，worker 等底层请求返回后清理，不能保证即时取消远端生成。
+
+对于auto，已进入明确坏调用纠错后不能用无调用正文放弃待交付批次；第一跳在原预算内继续纠正，耗尽时为`tool_repair_incomplete`。普通首代答复仍可正常结束，不能仅凭有工具定义推断用户任务已经完成；none与指定工具约束仍保留。源码与CLI验收的成功工具回执需由客户端任务验收核对，不能把模型口头承诺当作执行证据。
 
 第一跳单次网络 connect/read timeout 为 10/300 秒。relay 的 10/1800 秒约束的是 relay 到第一跳的网络等待；它们和共享生成窗口、agent 整场任务预算不同。调大 read timeout 不会延长第一跳的共享窗口。
 
 ### 可选的外部任务监督
 
-第一跳仓库提供可选 [OMP 监督器 `supervise.py`](https://github.com/FrozenYears/shanghaitech-genai2api/blob/main/validation/native-first-endurance/supervise.py)。它在同一真实 OMP 会话中，每轮结束后运行操作者指定的独立验收，对失败或停滞反馈继续；默认额外 8 次反馈、整场 45 分钟，单次 RPC 等待 1200 秒。
+第一跳仓库提供可选 [OMP 监督器 `supervise.py`](https://github.com/FrozenYears/shanghaitech-genai2api/blob/fix/streaming-tool-webp-stepwise/validation/native-first-endurance/supervise.py)。它在同一真实 OMP 会话中，每轮结束后运行操作者指定的独立验收，对失败或停滞反馈继续；默认额外 8 次反馈、整场 45 分钟，单次 RPC 等待 1200 秒。
 
-监督器不会自动安装或接管所有客户端。整场预算耗尽、权限/身份故障或无法确认会话停稳时，会保存状态并以非零状态退出；没有跨进程自动恢复，也不是 OS 沙箱。它可以在限定预算内减少人工逐次反馈，不能保证无人值守无限成功。配置与使用条件见[第一跳 README](https://github.com/FrozenYears/shanghaitech-genai2api/blob/main/README.md)。
+监督器不会自动安装或接管所有客户端。整场预算耗尽、权限/身份故障或无法确认会话停稳时，会保存状态并以非零状态退出；没有跨进程自动恢复，也不是 OS 沙箱。它可以在限定预算内减少人工逐次反馈，不能保证无人值守无限成功。配置与使用条件见[第一跳 README](https://github.com/FrozenYears/shanghaitech-genai2api/blob/fix/streaming-tool-webp-stepwise/README.md)。
 
 ## 兼容性与未支持特性
 
