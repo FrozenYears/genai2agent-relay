@@ -17,6 +17,7 @@ GenAI2AgentRelay 是连接 agent 客户端与学校网页代理的本地 HTTP �
   - [工具调用如何处理](#工具调用如何处理)
   - [与重构前的区别](#与重构前的区别)
 - [实测与资料](#实测与资料)
+- [致谢](#致谢)
 - [LICENSE](#LICENSE)
 
 ## 部署与接入
@@ -203,8 +204,11 @@ flowchart LR
 
 独立测试：在现有虚拟环境安装 pytest 后运行 `.venv/bin/python -m pytest tests -q`；Windows 替换解释器路径。部署检查不能只看单元测试。
 
-基于 [negativegluon/genai2agent-relay](https://github.com/negativegluon/genai2agent-relay)，感谢原作者的贡献！
+## 致谢
+
+本项目基于 [negativegluon/genai2agent-relay](https://github.com/negativegluon/genai2agent-relay) 开发，感谢原作者的工作！
 
 ## LICENSE
 
 [MIT](LICENSE)
+
