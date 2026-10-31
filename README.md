@@ -17,6 +17,7 @@ GenAI2AgentRelay 是连接 agent 客户端与学校网页代理的本地 HTTP �
   - [工具调用如何处理](#工具调用如何处理)
   - [与重构前的区别](#与重构前的区别)
 - [实测与资料](#实测与资料)
+- [LICENSE](#LICENSE)
 
 ## 部署与接入
 
@@ -165,7 +166,7 @@ flowchart LR
 
 2026-10-27 使用真实 omp 客户端和学校网页模型，在单独启动的双跳测试服务上完成 Python/CSV/SQLite 连续开发测试。测试时第一跳为 `2360089`、relay `cb86e44`，与当前 main 的运行代码一致。deepseek-pro 尚未在当前版本重新长测。下表是经 relay 和第一跳访问学校网页模型的完整双跳结果，不是 relay 单独的成功率。
 
-| 测试项 | Kimi-k3（10-27，当前运行代码） |
+| 测试项 | Kimi-k3（10-27，当前 main 版本） |
 | --- | ---: |
 | 执行总耗时 | 2060.25 秒 |
 | 阶段完成率 | 20/20 |
@@ -178,11 +179,11 @@ flowchart LR
 
 - 关闭客户端自动重试，额外反馈预算为 0。有一次工具调用格式出错，第一跳在原有重试次数与时间限制内纠正，然后把合法工具调用交给客户端；正文和思考实时流式输出。
 - 第 20 阶段两次 `bash` 业务验收报错，模型都在同一轮工具交互中修复。各阶段核对：最后一次改代码后，模型确实运行了验收命令并返回成功记录。末阶段共 72 项验收通过。
-- 只测了一次。其他 `auto` 任务仍可能只给计划而不继续执行，也不能用这一个样本给模型排速度名次。
+- 只进行了一次 kimi-k3 模型的测试。
 - [当前版本实测记录](https://github.com/FrozenYears/shanghaitech-genai2api/blob/main/validation/stepwise-streaming-webp-2026-10-27.json) 中的 `natural_runs.final_strict` 为这次长测；同一文件还保留了基线和中间版本的失败记录。
 
 <details>
-<summary>10-25 历史实测（旧版本，不代表当前 main）</summary>
+<summary>10-25 双模型历史实测（旧版本，不是当前 main）</summary>
 
 | 测试项 | deepseek-pro（10-25） | Kimi-k3（10-25） |
 | --- | ---: | ---: |
@@ -202,4 +203,8 @@ flowchart LR
 
 独立测试：在现有虚拟环境安装 pytest 后运行 `.venv/bin/python -m pytest tests -q`；Windows 替换解释器路径。部署检查不能只看单元测试。
 
-基于 [negativegluon/genai2agent-relay](https://github.com/negativegluon/genai2agent-relay)，采用 [MIT License](LICENSE)。
+基于 [negativegluon/genai2agent-relay](https://github.com/negativegluon/genai2agent-relay)，感谢原作者的贡献！
+
+## LICENSE
+
+[MIT](LICENSE)
