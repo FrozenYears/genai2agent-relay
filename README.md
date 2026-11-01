@@ -98,13 +98,12 @@ Windows 使用 `.venv/Scripts/python.exe main.py`。
 | `GPT-6.1-Terra` | GPT-6.1-Terra | 是 | 是 | 未测 |
 | `gpt-6-astra` | GPT-6-Astra | 是 | 是 | 未测 |
 | `GPT-6-Luna` | GPT-6-Luna | 是 | 是 | 未测 |
-| `GPT-Image-2` | GPT-Image-2.5-Sunburst | 不适用（绘图） | 不适用 | 不适用 |
+| `GPT-Image-2` | GPT-Image-2.5-Sunburst | N/A | N/A | N/A |
 | `chatglm` | GLM-5.3-Flash | 是 | 是 | 1M |
 | `qwen-instruct` | Qwen-3.8 | 是 | 否 | 512K |
 | `deepseek-pro` | DeepSeek-V4.1-Flash | 否 | 否 | 1M |
 | `Kimi-k3` | Kimi-K3 | 是 | 是 | 1M |
 
-思考支持不代表会返回思考内容。
 
 ### 接口
 
