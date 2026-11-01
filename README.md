@@ -101,7 +101,7 @@ Windows 使用 `.venv/Scripts/python.exe main.py`。
 | `GPT-Image-2` | GPT-Image-2.5-Sunburst |
 | `chatglm` | GLM-5.3-Flash |
 | `qwen-instruct` | Qwen-3.8 |
-| `deepseek-pro` | DeepSeek-V4.1-Flash-1017 |
+| `deepseek-pro` | DeepSeek-V4.1-Flash |
 | `Kimi-k3` | Kimi-K3 |
 
 ### 接口
