@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field, replace
 from typing import Any, Iterator, Protocol
+from uuid import uuid4
 
 from .actions import (
     ActionTransportError, DecodedAction, ToolSpec, decode_action, encode_calls,
@@ -178,6 +179,22 @@ class ActionRelay:
                         continue
                 if not decoded.text and not decoded.calls:
                     raise ActionTransportError("First-hop returned no answer or tool call")
+                if decoded.calls:
+                    history_ids = {call["id"] for message in request.messages for call in message.tool_calls}
+                    history_ids.update(message.tool_call_id for message in request.messages if message.tool_call_id)
+                    # 整批校验通过后才分配交付 ID；预留全批 ID，保留所有未碰撞调用。
+                    if any(call.id in history_ids for call in decoded.calls):
+                        reserved_ids = history_ids | {call.id for call in decoded.calls}
+                        calls = []
+                        for call in decoded.calls:
+                            if call.id in history_ids:
+                                call_id = "call_" + uuid4().hex
+                                while call_id in reserved_ids:
+                                    call_id = "call_" + uuid4().hex
+                                reserved_ids.add(call_id)
+                                call = replace(call, id=call_id)
+                            calls.append(call)
+                        decoded = replace(decoded, calls=tuple(calls))
                 if len(decoded.text) > emitted:
                     yield RelayEvent("text", decoded.text[emitted:])
                 yield RelayEvent("result", result=RelayResult(decoded, reply))

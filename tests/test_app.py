@@ -33,6 +33,33 @@ class Backend:
             self.closed = True
 
 
+class ToolBatchBackend(Backend):
+    def stream(self, request):
+        self.requests.append(request)
+        try:
+            self.phase = 1
+            yield RelayEvent("reasoning", "thinking")
+            self.phase = 2
+            yield RelayEvent("text", "first")
+            content = "first"
+            if request.tool_mode == "text":
+                envelope = "@@ACTION@@" + json.dumps({"calls": [
+                    {"id": call["id"], "operation": call["function"]["name"],
+                     "parameters": json.loads(call["function"]["arguments"])}
+                    for call in self.calls
+                ]}, ensure_ascii=False) + "@@END_ACTION@@"
+                self.phase = 3
+                yield RelayEvent("text", envelope)
+                content += envelope
+            self.phase = 4
+            yield RelayEvent("reply", reply=UpstreamReply(
+                content, "thinking", finish_reason="tool_calls" if request.tool_mode == "native" else "stop",
+                tool_calls=tuple(self.calls) if request.tool_mode == "native" else (),
+            ))
+        finally:
+            self.closed = True
+
+
 def data_events(raw):
     events = []
     for line in raw.splitlines():
@@ -47,6 +74,145 @@ class AppTests(unittest.TestCase):
 
     def payload(self, path, **kwargs):
         return {"model": "model", **({"input": "hello"} if path.endswith("responses") else {"messages": [{"role": "user", "content": "hello"}]}), **kwargs}
+
+    def history_payload(self, path, calls, stream):
+        schema = {"type": "object"}
+        history = []
+        for call in calls:
+            function = call["function"]
+            if path.endswith("completions"):
+                history.extend([
+                    {"role": "assistant", "content": None, "tool_calls": [call]},
+                    {"role": "tool", "tool_call_id": call["id"], "content": "done"},
+                ])
+            elif path.endswith("messages"):
+                history.extend([
+                    {"role": "assistant", "content": [{"type": "tool_use", "id": call["id"],
+                     "name": function["name"], "input": json.loads(function["arguments"])}]},
+                    {"role": "user", "content": [{"type": "tool_result", "tool_use_id": call["id"], "content": "done"}]},
+                ])
+            else:
+                history.extend([
+                    {"type": "function_call", "call_id": call["id"], **function},
+                    {"type": "function_call_output", "call_id": call["id"], "output": "done"},
+                ])
+        history.append({"role": "user", "content": "continue"})
+        if path.endswith("completions"):
+            tool = {"type": "function", "function": {"name": "ping", "parameters": schema}}
+        elif path.endswith("messages"):
+            tool = {"name": "ping", "input_schema": schema}
+        else:
+            tool = {"type": "function", "name": "ping", "parameters": schema}
+        return {"model": "model", "stream": stream, "tools": [tool],
+                "input" if path.endswith("responses") else "messages": history}
+
+    def consumer_calls(self, path, response, stream):
+        parsed = data_events(response.get_data(as_text=True)) if stream else None
+        if path.endswith("completions"):
+            calls = ([call for event in parsed for choice in event.get("choices", [])
+                      for call in choice["delta"].get("tool_calls", [])] if stream
+                     else response.json["choices"][0]["message"].get("tool_calls", []))
+            return [{key: value for key, value in call.items() if key != "index"} for call in calls]
+        if path.endswith("messages"):
+            if stream:
+                blocks = {}
+                arguments = {}
+                for event in parsed:
+                    if event["type"] == "content_block_start" and event["content_block"]["type"] == "tool_use":
+                        blocks[event["index"]] = event["content_block"]
+                        arguments[event["index"]] = ""
+                    elif event["type"] == "content_block_delta" and event["delta"]["type"] == "input_json_delta":
+                        arguments[event["index"]] += event["delta"]["partial_json"]
+                calls = [{**block, "input": json.loads(arguments[index])} for index, block in blocks.items()]
+            else:
+                calls = [block for block in response.json["content"] if block["type"] == "tool_use"]
+            return [{"id": call["id"], "type": "function", "function": {
+                "name": call["name"], "arguments": json.dumps(call["input"], ensure_ascii=False),
+            }} for call in calls]
+        if stream:
+            calls = [item for item in parsed[-1]["response"]["output"] if item["type"] == "function_call"]
+            for event_type in ("response.output_item.added", "response.output_item.done"):
+                items = [event["item"] for event in parsed if event["type"] == event_type
+                         and event["item"]["type"] == "function_call"]
+                self.assertEqual([(item["id"], item["call_id"]) for item in items],
+                                 [(item["id"], item["call_id"]) for item in calls])
+        else:
+            calls = [item for item in response.json["output"] if item["type"] == "function_call"]
+        return [{"id": call["call_id"], "type": "function",
+                 "function": {"name": call["name"], "arguments": call["arguments"]}} for call in calls]
+
+    def test_colliding_ids_round_trip_every_protocol_and_mode(self):
+        old_ids = ["call_1", "call_2845a4e20c8d4ea889a2acd9"]
+        arguments = [{"path": "旧文件"}, {"input": "line\n\\path\""}, {"value": [1, True, None]}]
+        batch = [{"id": call_id, "type": "function", "function": {
+            "name": "ping", "arguments": json.dumps(parameters, ensure_ascii=False),
+        }} for call_id, parameters in zip([*old_ids, "keep-this-id"], arguments)]
+        for path in ("/v1/chat/completions", "/v1/messages", "/v1/responses"):
+            for mode in ("native", "text"):
+                for stream in (False, True):
+                    with self.subTest(path=path, mode=mode, stream=stream):
+                        history = list(batch[:2])
+                        backend = ToolBatchBackend(batch)
+                        client = self.client(backend, upstream_tool_mode=mode)
+                        for round_index in range(2):
+                            response = client.post(path, json=self.history_payload(path, history, stream), buffered=False)
+                            self.assertEqual(response.status_code, 200)
+                            if stream:
+                                iterator = iter(response.response)
+                                prefix = ""
+                                while "first" not in prefix:
+                                    prefix += next(iterator).decode()
+                                self.assertEqual(backend.phase, 2)
+                                self.assertIn("thinking", prefix)
+                                response.set_data(prefix.encode() + b"".join(iterator))
+                            calls = self.consumer_calls(path, response, stream)
+                            ids = [call["id"] for call in calls]
+                            self.assertEqual(len(ids), 3)
+                            self.assertEqual(len(set(ids)), 3)
+                            self.assertTrue(set(ids).isdisjoint(call["id"] for call in history))
+                            if round_index == 0:
+                                self.assertEqual(ids[2], "keep-this-id")
+                            self.assertEqual([call["function"]["name"] for call in calls], ["ping"] * 3)
+                            self.assertEqual([json.loads(call["function"]["arguments"]) for call in calls], arguments)
+                            history.extend(calls)
+                        self.assertEqual(len(backend.requests), 2)
+
+    def test_duplicate_batch_ids_are_not_repaired_or_partially_delivered(self):
+        call = {"id": "call_1", "type": "function", "function": {"name": "ping", "arguments": "{}"}}
+        for path in ("/v1/chat/completions", "/v1/messages", "/v1/responses"):
+            for mode in ("native", "text"):
+                for stream in (False, True):
+                    with self.subTest(path=path, mode=mode, stream=stream):
+                        backend = ToolBatchBackend([call, call])
+                        response = self.client(backend, upstream_tool_mode=mode).post(
+                            path, json=self.history_payload(path, [call], stream),
+                        )
+                        if stream:
+                            parsed = data_events(response.get_data(as_text=True))
+                            self.assertTrue(any("error" in event or event.get("type") == "error" for event in parsed))
+                            self.assertFalse(any(choice["delta"].get("tool_calls") for event in parsed
+                                                 for choice in event.get("choices", [])))
+                            self.assertFalse(any(event.get("content_block", {}).get("type") == "tool_use" for event in parsed))
+                            self.assertFalse(any(event.get("item", {}).get("type") == "function_call" for event in parsed))
+                            self.assertNotIn("message_stop", [event.get("type") for event in parsed])
+                            self.assertNotIn("response.completed", [event.get("type") for event in parsed])
+                            self.assertNotIn("[DONE]", response.get_data(as_text=True))
+                        else:
+                            self.assertEqual(response.status_code, 502)
+                        self.assertEqual(len(backend.requests), 1)
+
+    def test_already_duplicate_history_is_rejected_before_upstream(self):
+        call = {"id": "call_1", "type": "function", "function": {"name": "ping", "arguments": "{}"}}
+        for path in ("/v1/chat/completions", "/v1/messages", "/v1/responses"):
+            for stream in (False, True):
+                with self.subTest(path=path, stream=stream):
+                    backend = ToolBatchBackend([call])
+                    response = self.client(backend).post(
+                        path, json=self.history_payload(path, [call, call], stream),
+                    )
+                    self.assertEqual(response.status_code, 400)
+                    self.assertIn("Duplicate historical tool call ID", response.get_data(as_text=True))
+                    self.assertEqual(backend.requests, [])
 
     def test_all_protocols_start_before_backend_and_stream_incrementally(self):
         for path in ("/v1/chat/completions", "/v1/messages", "/v1/responses"):
