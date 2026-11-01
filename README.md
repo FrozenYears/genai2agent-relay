@@ -94,10 +94,10 @@ Windows 使用 `.venv/Scripts/python.exe main.py`。
 
 | Model ID | 实际模型 | 视觉（图片输入） | 思考 | 上下文上限 |
 | --- | --- | --- | --- | --- |
-| `GPT-6.1-Sol` | GPT-6.1-Sol | 是 | 是 | 未测 |
-| `GPT-6.1-Terra` | GPT-6.1-Terra | 是 | 是 | 未测 |
-| `gpt-6-astra` | GPT-6-Astra | 是 | 是 | 未测 |
-| `GPT-6-Luna` | GPT-6-Luna | 是 | 是 | 未测 |
+| `GPT-6.1-Sol` | GPT-6.1-Sol | 是 | 是 | [1.05M](https://developers.openai.com/api/docs/models/gpt-6.1-sol) |
+| `GPT-6.1-Terra` | GPT-6.1-Terra | 是 | 是 | [1.05M](https://developers.openai.com/api/docs/models/gpt-6.1-terra) |
+| `gpt-6-astra` | GPT-6-Astra | 是 | 是 | [1.05M](https://developers.openai.com/api/docs/models/gpt-6-astra.md) |
+| `GPT-6-Luna` | GPT-6-Luna | 是 | 是 | [1.05M](https://developers.openai.com/api/docs/models/gpt-6-luna.md) |
 | `GPT-Image-2` | GPT-Image-2.5-Sunburst | N/A | N/A | N/A |
 | `chatglm` | GLM-5.3-Flash | 是 | 是 | 1M |
 | `qwen-instruct` | Qwen-3.8 | 是 | 否 | 512K |
