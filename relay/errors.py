@@ -3,6 +3,8 @@ from __future__ import annotations
 import re
 from typing import Any, Iterable
 
+from .actions import ActionDelimiterError, ActionTransportError, ActionValidationError
+
 
 # 只输出诊断字段；认证值和不透明编码串不能随错误穿透两跳服务。
 _CREDENTIAL = re.compile(
@@ -58,4 +60,12 @@ class UpstreamError(RuntimeError):
 def error_fields(exc: Exception) -> dict[str, Any]:
     if isinstance(exc, UpstreamError):
         return dict(exc.error)
-    return {"type": "api_error", "code": "upstream_error", "message": safe_message(str(exc))}
+    if isinstance(exc, ActionValidationError):
+        code = "tool_contract_error"
+    elif isinstance(exc, ActionDelimiterError):
+        code = "tool_call_parse_error"
+    elif isinstance(exc, ActionTransportError):
+        code = "action_transport_error"
+    else:
+        code = "upstream_error"
+    return {"type": "api_error", "code": code, "message": safe_message(str(exc))}

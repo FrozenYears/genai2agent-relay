@@ -319,3 +319,20 @@ class AppTests(unittest.TestCase):
         })
         self.assertEqual(response.status_code, 502)
         self.assertEqual(len(backend.requests), 1)
+
+    def test_invalid_tool_batch_is_distinct_from_connection_failure(self):
+        valid = {"id": "valid", "type": "function", "function": {"name": "ping", "arguments": "{}"}}
+        invalid = {**valid, "function": {"name": "unknown", "arguments": "{}"}}
+        for path in ("/v1/chat/completions", "/v1/messages", "/v1/responses"):
+            for stream in (False, True):
+                for backend, code in ((Backend([invalid]), "tool_contract_error"),
+                                      (Backend(fail=True), "upstream_error")):
+                    with self.subTest(path=path, stream=stream, code=code):
+                        response = self.client(backend).post(path, json=self.history_payload(path, [valid], stream))
+                        if stream:
+                            error = next(event for event in data_events(response.get_data(as_text=True))
+                                         if "error" in event or event.get("type") == "error")
+                            error = error.get("error", error)
+                        else:
+                            error = response.json["error"]
+                        self.assertEqual(error["code"], code)

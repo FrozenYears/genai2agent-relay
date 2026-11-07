@@ -129,13 +129,15 @@ def render_action_prompt(tools: list[ToolSpec], choice: str | None = None) -> st
         "Do not include name, arguments, function or other wrapper fields. "
         "Only independent operations may share one calls array. If a later operation depends on a result, "
         "request only the first operation and wait for the client result before continuing. "
-        "Do not claim a file write/edit succeeded based on the call or a generic success status. "
-        "If a read operation is available, compare its full result character-for-character with the "
-        "original user-requested content, not your own previous output. If it differs, correct it; "
-        "if exact verification is unavailable, say so instead of claiming the requested content is present. "
-        "Once all requested operations and read-back verification are complete, respond with a plain-text "
-        "final answer without an action envelope. Do not repeat a read that already verified the same "
-        "unchanged file. "
+        "Do not claim success from a call, a background-job start, a subagent's completed status, or a sample PASS. "
+        "Check the matching execution result and verify the requested deliverables and scope using appropriate tools. "
+        "Reuse sufficient evidence for unchanged files instead of repeating reads; if verification is unavailable, "
+        "keep that scope explicitly unverified. Historical calls are requests, not proof of execution or success. "
+        "is_error=true means the invocation failed; false alone does not prove completion. "
+        "Inspect output and follow the tool's completion mechanism without polling or resubmitting a running job; "
+        "do not replay successful operations. "
+        "The envelope must be final, with only whitespace after @@END_ACTION@@. "
+        "Once requested work and verification are complete, give a plain-text final answer without an envelope. "
         "Do not use XML, markdown fences, native special tokens, or simulated results. "
         f"A promised action without the envelope will not execute. {choice_text}"
     )
@@ -151,8 +153,8 @@ def encode_calls(calls: list[dict[str, Any]]) -> str:
 def encode_result(call_id: str, output: Any, is_error: bool = False) -> str:
     payload = {"call_id": call_id, "output": output, "is_error": bool(is_error)}
     return (
-        "This is an execution result from a tool that has already run, not a new user request. "
-        "Use this result to continue any unfinished work or give the final answer.\n"
+        "Tool invocation result, not a new user request. Match call_id to its historical request. "
+        "is_error=true means failure; inspect output for the actual state. A background start or subagent status is not verified delivery.\n"
         + RESULT_OPEN + json.dumps(payload, ensure_ascii=False, separators=(",", ":")) + RESULT_CLOSE
     )
 
