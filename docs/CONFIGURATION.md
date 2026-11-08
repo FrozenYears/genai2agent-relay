@@ -44,6 +44,8 @@ Copy-Item .env.example .env
 # 等价入口：.\.venv\Scripts\python.exe main.py
 ```
 
+环境变量优先于`.env`，从启动过第一跳的终端启动relay时应检查继承的`PORT`、`API_KEY`等，避免relay监听31100。若本次明确以relay本地`.env`为准，可从relay目录运行`.venv/Scripts/python.exe -B -c 'from dotenv import load_dotenv; load_dotenv(".env", override=True); from relay.main import main; main()'`。这只覆盖该子进程，不修改全局环境；通常启动仍保留环境变量优先。
+
 如果在父工作区中操作，先进入其 `genai2agent-relay` 子目录。Windows 的 `D:\shanghaitech-genai2api\genai2agent-relay` 在 WSL 中通常对应 `/mnt/d/shanghaitech-genai2api/genai2agent-relay`；WSL 与 Windows 的 `.venv/bin`、`.venv\Scripts` 不可混用，建议分开检出并各建环境。示例假设两跳能通过同一环境的 `127.0.0.1` 互访；不要直接把跨 WSL/Windows 的回环互通当作保证。
 
 ## 鉴权与 `.env`
@@ -155,6 +157,8 @@ relay自身生成的错误不再统一压为`upstream_error`：工具批次/Sche
 两类次数累计、不相互重置，默认每请求最多`1+8+3=12`次生成。900秒窗口不因心跳或新一代续期。完整原历史和工具约束不变，不虚构结果、不换模型、不降级、不重放客户端操作。已交付工具、网络错误、断流、截断、取消或到期不重放。无工具请求不启用这些恢复或工具deadline。
 
 空预算耗尽为 `upstream_empty_response`，纠错耗尽保留具体错误码并说明耗尽，deadline 为 `upstream_request_timeout`。失败没有成功终态，未校验调用不交付。第一跳关闭已取得的 socket；尚未取得响应头时，主响应可按窗口失败，worker 等底层请求返回后清理，不能保证即时取消远端生成。
+
+第一跳聊天认证另有最多一次刷新：识别HTTP 401及HTTP 200/SSE明确的`Token失效，请重新登录`。业务认证拒绝必须发生在任何正文、思考或原生工具片段之前才可重送；沿用同一deadline，失败为`upstream_authentication_failed`。relay只透传结果，不叠加刷新或重试。服务不可用、断流及已有输出后的错误仍真实失败。
 
 对于auto，已进入明确坏调用纠错后不能用无调用正文放弃待交付批次；第一跳在原预算内继续纠正，耗尽时为`tool_repair_incomplete`。普通首代答复仍可正常结束，不能仅凭有工具定义推断用户任务已经完成；none与指定工具约束仍保留。源码与CLI验收的成功工具回执需由客户端任务验收核对，不能把模型口头承诺当作执行证据。
 

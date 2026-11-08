@@ -83,6 +83,7 @@ MAX_ACTION_BYTES=1048576
 ```
 
 Windows 使用 `.venv/Scripts/python.exe main.py`。
+从启动过第一跳的终端启动时，注意继承的`PORT`等环境变量会优先于relay的`.env`；显式使用本地配置的启动方法见[配置说明](docs/CONFIGURATION.md#windows-powershell)。
 
 > [!WARNING]
 > relay 默认仅监听 `127.0.0.1`，但第一跳当前监听 `0.0.0.0`。
