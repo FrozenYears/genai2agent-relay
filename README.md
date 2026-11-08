@@ -242,6 +242,8 @@ flowchart LR
 
 - [完整配置与限制](docs/CONFIGURATION.md) · [附件与思考透传](docs/genai2api-feature-passthrough.zh-CN.md) · [历史修复](docs/action-envelope-fixes.zh-CN.md)
 
+2026-11-08重启修复分支后的真实双跳续测：DeepSeek复制旧源码、新会话续24–30全部通过，另有真实项目脚本交付验证；Kimi经多段有界恢复验证至29，第30文档/清单在追加90分钟到期时仍未交付。两者不是同负载速度对照，分段结果不等于一次无中断30阶段成功；原始失败与工具错误保留，细节见[续测与闭环记录](https://github.com/FrozenYears/shanghaitech-genai2api/blob/fix/kimi-longrun-integrity/docs/USAGE.md#同日重启后的真实续测与闭环)。
+
 独立测试：在现有虚拟环境安装 pytest 后运行 `.venv/bin/python -m pytest tests -q`；Windows 替换解释器路径。部署检查不能只看单元测试。
 
 ## 致谢
