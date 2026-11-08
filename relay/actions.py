@@ -137,7 +137,8 @@ def render_action_prompt(tools: list[ToolSpec], choice: str | None = None) -> st
         "Inspect output and follow the tool's completion mechanism without polling or resubmitting a running job; "
         "do not replay successful operations. "
         "The envelope must be final, with only whitespace after @@END_ACTION@@. "
-        "Once requested work and verification are complete, give a plain-text final answer without an envelope. "
+        "When requested work and verification are complete, use a declared completion tool if the client "
+        "explicitly designates one; otherwise give a plain-text final answer without an envelope. "
         "Do not use XML, markdown fences, native special tokens, or simulated results. "
         f"A promised action without the envelope will not execute. {choice_text}"
     )
@@ -150,8 +151,25 @@ def encode_calls(calls: list[dict[str, Any]]) -> str:
     return ACTION_OPEN + json.dumps(payload, ensure_ascii=False, separators=(",", ":")) + ACTION_CLOSE
 
 
-def encode_result(call_id: str, output: Any, is_error: bool = False) -> str:
+def encode_result(call_id: str, output: Any, is_error: bool = False, *, metadata: dict[str, Any] | None = None) -> str:
     payload = {"call_id": call_id, "output": output, "is_error": bool(is_error)}
+    source = metadata or {}
+    details = source.get("details")
+    if isinstance(details, dict):
+        execution = {key: details[key] for key in ("exitCode", "timedOut")
+                     if key in details and type(details[key]) in (int, bool)}
+        job = details.get("async")
+        if isinstance(job, dict):
+            lifecycle = {key: job[key] for key in ("jobId", "type", "state") if isinstance(job.get(key), str)}
+            if lifecycle:
+                execution["async"] = lifecycle
+        if execution:
+            payload["execution"] = execution
+    error = source.get("error")
+    if isinstance(error, dict):
+        codes = {key: error[key] for key in ("code", "type") if isinstance(error.get(key), str)}
+        if codes:
+            payload["error"] = codes
     return (
         "Tool invocation result, not a new user request. Match call_id to its historical request. "
         "is_error=true means failure; inspect output for the actual state. A background start or subagent status is not verified delivery.\n"

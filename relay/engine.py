@@ -221,6 +221,7 @@ class ActionRelay:
                 content = build_content([
                     escape_action_markers(encode_result(
                         message.tool_call_id or "", text_of(content), bool(message.extra.get("is_error")),
+                        metadata=message.extra,
                     )),
                 ], attachments_of(content))
                 converted.append(TextMessage("user", content))

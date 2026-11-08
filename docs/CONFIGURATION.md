@@ -123,6 +123,12 @@ MAX_ACTION_BYTES=1048576
 
 relay自身生成的错误不再统一压为`upstream_error`：工具批次/Schema/选择约束为`tool_contract_error`，损坏定界符为`tool_call_parse_error`，其它动作传输故障为`action_transport_error`。这些代码帮助客户端区分故障，不改变HTTP状态、恢复预算或已交付内容不可撤回的边界，也不提供业务完成证明。
 
+工具回执的执行信息：native保留结构化`details/error`到第一跳；显式text将白名单`details.async.{jobId,type,state}`、`exitCode`、`timedOut`及`error.code/type`写入结果数据。配套第一跳也将这些字段携入网页工具回执，避免只有“任务已启动”而丢失后续所需job身份；不展开任意details、错误全文或opaque推理内容。Messages的扩展字段同样保留，字段本身不证明任务完成。
+
+第一跳仓库另提供显式TaskClient/CLI试点，只有主动接入才启用完成握手与本地验收；不是relay新默认模式，不会自动接管现有omp/Claude Code/Codex，不把普通auto问答改成强制工具。用法见[任务客户端](https://github.com/FrozenYears/shanghaitech-genai2api/blob/fix/kimi-longrun-integrity/docs/USAGE.md#显式任务客户端试点)。
+
+若客户端明确指定了已声明的完成工具，动作提示尊重该完成机制；未指定时仍普通纯文本终答。这不允许凭完成工具回执跳过独立业务验收，也不要求普通问答为了结束而制造动作。
+
 `MAX_ACTION_BYTES` 默认值为 `1048576`。流式读取过程中，它统计正文、思考、工具名、ID 及参数累计占用的 UTF-8 字节数。单条不完整的 SSE 事件同样受该上限约束。重复的 SSE 元数据与心跳不占用此累计载荷配额。该配置用于限制整个响应的消费体量，不仅限于工具参数大小。
 
 客户端中断流式连接会同步断开上游 HTTP 响应。若在响应头返回前连接挂起，其等待时长受网络超时限制；无法保证立即中止远端大模型的后台推理。整批校验不是文件权限审查，也不是 OS 沙箱，无法证明写入的文件内容符合预期。客户端必须自行对工具进行权限控制，重要写入操作应通过执行、回读或哈希校验等方式确认。

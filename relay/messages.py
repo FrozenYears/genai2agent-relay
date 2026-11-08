@@ -173,7 +173,8 @@ def prepare_messages(body: dict[str, Any], tools: list[ToolSpec], choice: str) -
                 role="tool",
                 tool_call_id=history_call_id(block.get("tool_use_id")),
                 content=merge_content([result_text], result_attachments),
-                extra={"is_error": bool(block.get("is_error", False))},
+                extra={"is_error": bool(block.get("is_error", False)),
+                       **{key: deepcopy(block[key]) for key in ("details", "error") if key in block}},
             ))
         flush()
 
